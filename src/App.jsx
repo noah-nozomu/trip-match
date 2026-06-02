@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { ref, set, get } from "firebase/database";
+import { ref, set, get, remove } from "firebase/database";
 import { db } from "./firebase";
 
 // ─── Matching Algorithm ────────────────────────────────────────────────────────
@@ -104,6 +104,20 @@ async function loadSession(sessionId) {
   return data;
 }
 
+async function deleteSession(sessionId) {
+  await remove(ref(db, `sessions/${sessionId}`));
+}
+
+const unlockKey = (sessionId) => `tripmatch_unlock_${sessionId}`;
+
+function isValidJoinPassword(pw) {
+  return /^\d{4}$/.test(pw);
+}
+
+function digitsOnly(value, maxLen = 4) {
+  return value.replace(/\D/g, "").slice(0, maxLen);
+}
+
 // ─── Design tokens ────────────────────────────────────────────────────────────
 const C = {
   bg: "#0a0a0f",
@@ -163,6 +177,8 @@ function StatusBadge({ status }) {
 // ─── Organizer: Setup ──────────────────────────────────────────────────────────
 function OrgSetup({ onStart }) {
   const [eventName, setEventName] = useState("団体旅行2025");
+  const [joinPassword, setJoinPassword] = useState("");
+  const [setupErr, setSetupErr] = useState("");
   const [groupConfig, setGroupConfig] = useState([{ id: 1, size: 2, count: 2, name: "" }]);
 
   const totalSlots  = groupConfig.reduce((a, c) => a + c.size * c.count, 0);
@@ -231,7 +247,31 @@ function OrgSetup({ onStart }) {
         </div>
       </div>
 
-      <button onClick={() => onStart(eventName, groupConfig)}
+      <div style={{ ...s.card, marginBottom: 16 }}>
+        <label style={s.label}>参加パスワード（4桁）</label>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>参加者に別途伝えてください（URLだけでは参加できません）</div>
+        <input
+          style={{ ...s.input, letterSpacing: 8, fontSize: 22, textAlign: "center", fontFamily: "monospace" }}
+          type="password"
+          inputMode="numeric"
+          autoComplete="off"
+          maxLength={4}
+          value={joinPassword}
+          onChange={(e) => { setJoinPassword(digitsOnly(e.target.value)); setSetupErr(""); }}
+          placeholder="••••"
+        />
+        {setupErr && <div style={{ color: C.red, fontSize: 13, marginTop: 8 }}>{setupErr}</div>}
+      </div>
+
+      <button
+        onClick={() => {
+          const pin = digitsOnly(joinPassword);
+          if (!isValidJoinPassword(pin)) {
+            setSetupErr("4桁の数字を設定してください");
+            return;
+          }
+          onStart(eventName, groupConfig, pin);
+        }}
         style={{ ...s.btn("primary"), width: "100%", padding: 16, fontSize: 16 }}>
         参加URLを発行する →
       </button>
@@ -276,6 +316,17 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset }) {
           </button>
         </div>
       </div>
+
+      {session.joinPassword && (
+        <div style={{ ...s.card, marginBottom: 16, borderColor: C.teal + "40" }}>
+          <label style={s.label}>参加パスワード</label>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>URLとは別に、LINEなどで参加者へ共有してください</div>
+          <div style={{
+            fontFamily: "monospace", fontSize: 28, fontWeight: 900, letterSpacing: 12,
+            textAlign: "center", padding: "12px 0", color: C.teal,
+          }}>{session.joinPassword}</div>
+        </div>
+      )}
 
       <div style={{ ...s.card, marginBottom: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
@@ -419,24 +470,68 @@ function ParticipantView({ sessionId }) {
   const [myName,      setMyName]      = useState("");
   const [myId,        setMyId]        = useState(null);
   const [preferences, setPreferences] = useState([]);
-  const [step,        setStep]        = useState("join");
+  const [passwordInput, setPasswordInput] = useState("");
+  const [unlocked, setUnlocked] = useState(() => !!sessionStorage.getItem(unlockKey(sessionId)));
+  const [step,        setStep]        = useState(() =>
+    sessionStorage.getItem(unlockKey(sessionId)) ? "join" : "password"
+  );
   const [loading,     setLoading]     = useState(false);
   const [err,         setErr]         = useState("");
   const pollRef = useRef(null);
 
   const refresh = useCallback(async () => {
+    if (!unlocked) return;
     const s = await loadSession(sessionId);
     if (s) {
       setSession(s);
-      if (s.status === "matched") setStep("result");
+      if (s.status === "matched" && step !== "password") setStep("result");
+    } else {
+      setSession(null);
+      setStep("password");
+      setUnlocked(false);
+      sessionStorage.removeItem(unlockKey(sessionId));
     }
-  }, [sessionId]);
+  }, [sessionId, unlocked, step]);
 
   useEffect(() => {
+    if (!unlocked) return;
     refresh();
     pollRef.current = setInterval(refresh, 4000);
     return () => clearInterval(pollRef.current);
-  }, [refresh]);
+  }, [refresh, unlocked]);
+
+  const verifyPassword = async () => {
+    const pin = digitsOnly(passwordInput);
+    if (!isValidJoinPassword(pin)) {
+      setErr("4桁のパスワードを入力してください");
+      return;
+    }
+    setLoading(true); setErr("");
+    const s = await loadSession(sessionId);
+    if (!s) {
+      setErr("セッションが見つかりません");
+      setLoading(false);
+      return;
+    }
+    if (!s.joinPassword) {
+      sessionStorage.setItem(unlockKey(sessionId), "1");
+      setUnlocked(true);
+      setSession(s);
+      setStep(s.status === "matched" ? "result" : "join");
+      setLoading(false);
+      return;
+    }
+    if (pin !== s.joinPassword) {
+      setErr("パスワードが正しくありません");
+      setLoading(false);
+      return;
+    }
+    sessionStorage.setItem(unlockKey(sessionId), "1");
+    setUnlocked(true);
+    setSession(s);
+    setStep(s.status === "matched" ? "result" : "join");
+    setLoading(false);
+  };
 
   const joinSession = async () => {
     if (!myName.trim()) { setErr("名前を入力してください"); return; }
@@ -493,6 +588,34 @@ function ParticipantView({ sessionId }) {
     if (j < 0 || j >= arr.length) return arr;
     [arr[i], arr[j]] = [arr[j], arr[i]]; return arr;
   });
+
+  if (step === "password") return (
+    <div>
+      <div style={{ marginBottom: 28 }}>
+        <div style={{ fontSize: 11, letterSpacing: 3, color: C.accent, marginBottom: 8 }}>JOIN SESSION</div>
+        <h2 style={{ margin: 0, fontSize: 24, fontWeight: 900 }}>参加パスワード</h2>
+        <div style={{ color: C.muted, fontSize: 14, marginTop: 6 }}>幹事から共有された4桁の数字を入力してください</div>
+      </div>
+      <div style={{ ...s.card, marginBottom: 20 }}>
+        <label style={s.label}>パスワード（4桁）</label>
+        <input
+          style={{ ...s.input, letterSpacing: 8, fontSize: 22, textAlign: "center", fontFamily: "monospace" }}
+          type="password"
+          inputMode="numeric"
+          autoComplete="off"
+          maxLength={4}
+          value={passwordInput}
+          onChange={(e) => { setPasswordInput(digitsOnly(e.target.value)); setErr(""); }}
+          placeholder="••••"
+          onKeyDown={(e) => e.key === "Enter" && verifyPassword()}
+        />
+        {err && <div style={{ color: C.red, fontSize: 13, marginTop: 8 }}>{err}</div>}
+      </div>
+      <button onClick={verifyPassword} disabled={loading} style={{ ...s.btn("teal"), width: "100%", padding: 16, fontSize: 15 }}>
+        {loading ? "確認中..." : "次へ →"}
+      </button>
+    </div>
+  );
 
   if (!session) return (
     <div style={{ textAlign: "center", padding: 60, color: C.muted }}>
@@ -681,9 +804,12 @@ export default function App() {
     }
   }, [sessionId, mode, refreshSession]);
 
-  const handleStart = async (eventName, groupConfig) => {
+  const handleStart = async (eventName, groupConfig, joinPassword) => {
     const id = generateSessionId();
-    const newSession = { id, eventName, groupConfig, participants: [], status: "waiting", result: null, createdAt: Date.now() };
+    const newSession = {
+      id, eventName, groupConfig, joinPassword,
+      participants: [], status: "waiting", result: null, createdAt: Date.now(),
+    };
     await saveSession(id, newSession);
     setSessionId(id); setSession(newSession); setOrgStep("dashboard");
   };
@@ -698,7 +824,15 @@ export default function App() {
     setSession(s); setOrgStep("result");
   };
 
-  const handleReset = () => { setSessionId(null); setSession(null); setOrgStep("setup"); };
+  const handleReset = async () => {
+    if (sessionId) {
+      await deleteSession(sessionId);
+      sessionStorage.removeItem(unlockKey(sessionId));
+    }
+    setSessionId(null);
+    setSession(null);
+    setOrgStep("setup");
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic', sans-serif" }}>
