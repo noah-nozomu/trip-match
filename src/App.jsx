@@ -581,22 +581,24 @@ function ParticipantView({ sessionId }) {
   const [myId,        setMyId]        = useState(savedIdentity?.myId ?? null);
   const [preferences, setPreferences] = useState([]);
   const [passwordInput, setPasswordInput] = useState("");
-  const [unlocked, setUnlocked] = useState(() => !!sessionStorage.getItem(unlockKey(sessionId)));
+  const hasUnlock = () =>
+    !!sessionStorage.getItem(unlockKey(sessionId)) || !!loadParticipantIdentity(sessionId)?.myId;
+  const [unlocked, setUnlocked] = useState(() => hasUnlock());
   const [step, setStep] = useState(() => {
-    if (!sessionStorage.getItem(unlockKey(sessionId))) return "password";
+    if (!hasUnlock()) return "password";
     if (savedIdentity?.myId) return "restore";
     return "join";
   });
   const [loading,     setLoading]     = useState(false);
   const [err,         setErr]         = useState("");
   const pollRef = useRef(null);
-  const restoredRef = useRef(false);
 
   const applyParticipantFromSession = useCallback((s, participant) => {
     setMyId(participant.id);
     setMyName(participant.name);
     setPreferences(participant.preferences || []);
     setSession(s);
+    sessionStorage.setItem(unlockKey(sessionId), "1");
     saveParticipantIdentity(sessionId, {
       myId: participant.id,
       myName: participant.name,
@@ -642,16 +644,19 @@ function ParticipantView({ sessionId }) {
   }, [sessionId, unlocked, myId]);
 
   useEffect(() => {
-    if (!unlocked || restoredRef.current) return;
+    if (!unlocked || step !== "restore") return;
     const saved = loadParticipantIdentity(sessionId);
-    if (!saved?.myId) return;
-    restoredRef.current = true;
+    if (!saved?.myId) {
+      setStep("join");
+      return;
+    }
 
+    let cancelled = false;
     (async () => {
       const s = await loadSession(sessionId);
+      if (cancelled) return;
       if (!s) {
         clearParticipantIdentity(sessionId);
-        restoredRef.current = false;
         setStep("password");
         setUnlocked(false);
         sessionStorage.removeItem(unlockKey(sessionId));
@@ -667,7 +672,9 @@ function ParticipantView({ sessionId }) {
       }
       applyParticipantFromSession(s, me);
     })();
-  }, [unlocked, sessionId, applyParticipantFromSession]);
+
+    return () => { cancelled = true; };
+  }, [unlocked, step, sessionId, applyParticipantFromSession]);
 
   useEffect(() => {
     if (!unlocked || step === "restore") return;
@@ -696,7 +703,6 @@ function ParticipantView({ sessionId }) {
     }
     sessionStorage.setItem(unlockKey(sessionId), "1");
     setUnlocked(true);
-    restoredRef.current = true;
     const saved = loadParticipantIdentity(sessionId);
     if (saved?.myId) {
       const me = (s.participants || []).find((p) => p.id === saved.myId);
@@ -986,7 +992,6 @@ export default function App() {
     !joinParam && !!savedOrganizer?.sessionId,
   );
   const pollRef = useRef(null);
-  const orgRestoredRef = useRef(false);
 
   const refreshSession = useCallback(async () => {
     if (!sessionId) return;
@@ -1003,11 +1008,13 @@ export default function App() {
   }, [sessionId]);
 
   useEffect(() => {
-    if (joinParam || orgRestoredRef.current || !orgRestoring || !sessionId) return;
-    orgRestoredRef.current = true;
+    if (joinParam || !orgRestoring || !sessionId) return;
 
+    let cancelled = false;
     (async () => {
+      const saved = loadOrganizerState();
       const s = await loadSession(sessionId);
+      if (cancelled) return;
       if (!s) {
         clearOrganizerState();
         setSessionId(null);
@@ -1016,14 +1023,16 @@ export default function App() {
         return;
       }
       setSession(s);
-      let step = savedOrganizer?.orgStep || "dashboard";
+      let step = saved?.orgStep || "dashboard";
       if (s.status === "matched") step = "result";
       else if (step === "result") step = "dashboard";
       setOrgStep(step);
       saveOrganizerState({ sessionId, orgStep: step });
       setOrgRestoring(false);
     })();
-  }, [joinParam, orgRestoring, sessionId, savedOrganizer?.orgStep]);
+
+    return () => { cancelled = true; };
+  }, [joinParam, orgRestoring, sessionId]);
 
   useEffect(() => {
     if (mode !== "organizer") return;
@@ -1049,7 +1058,11 @@ export default function App() {
       participants: [], status: "waiting", result: null, createdAt: Date.now(),
     };
     await saveSession(id, newSession);
-    setSessionId(id); setSession(newSession); setOrgStep("dashboard");
+    saveOrganizerState({ sessionId: id, orgStep: "dashboard" });
+    setSessionId(id);
+    setSession(newSession);
+    setOrgStep("dashboard");
+    setOrgRestoring(false);
   };
 
   const handleSaveSettings = async (eventName, groupConfig) => {
@@ -1072,7 +1085,9 @@ export default function App() {
     s.status = "matched";
     s.result = { groups, satisfaction };
     await saveSession(sessionId, s);
-    setSession(s); setOrgStep("result");
+    saveOrganizerState({ sessionId, orgStep: "result" });
+    setSession(s);
+    setOrgStep("result");
   };
 
   const handleReset = async () => {
@@ -1086,7 +1101,6 @@ export default function App() {
     setSession(null);
     setOrgStep("setup");
     setOrgRestoring(false);
-    orgRestoredRef.current = false;
   };
 
   return (
