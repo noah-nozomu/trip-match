@@ -4,6 +4,7 @@ import { db } from "./firebase";
 
 // ─── Matching Algorithm ────────────────────────────────────────────────────────
 function runMatching(participants, groupConfig) {
+  groupConfig = normalizeGroupConfig(groupConfig);
   const ids = participants.map((p) => p.id);
   const n = participants.length;
 
@@ -134,26 +135,46 @@ function clearParticipantIdentity(sessionId) {
   sessionStorage.removeItem(participantKey(sessionId));
 }
 
-const ORGANIZER_STORAGE_KEY = "tripmatch_organizer";
+const ORGANIZER_SESSION_KEY = "tripmatch_organizer_sessionId";
+const ORGANIZER_STEP_KEY = "tripmatch_organizer_step";
+const ORGANIZER_STEPS_PERSIST = new Set(["dashboard", "result"]);
 
 function saveOrganizerState({ sessionId, orgStep }) {
-  sessionStorage.setItem(ORGANIZER_STORAGE_KEY, JSON.stringify({ sessionId, orgStep }));
+  if (!sessionId || !ORGANIZER_STEPS_PERSIST.has(orgStep)) return;
+  localStorage.setItem(ORGANIZER_SESSION_KEY, sessionId);
+  localStorage.setItem(ORGANIZER_STEP_KEY, orgStep);
 }
 
 function loadOrganizerState() {
   try {
-    const raw = sessionStorage.getItem(ORGANIZER_STORAGE_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (!data.sessionId || !data.orgStep) return null;
-    return data;
+    let sessionId = localStorage.getItem(ORGANIZER_SESSION_KEY);
+    let orgStep = localStorage.getItem(ORGANIZER_STEP_KEY);
+    if (!sessionId) {
+      const legacy = sessionStorage.getItem("tripmatch_organizer");
+      if (legacy) {
+        const data = JSON.parse(legacy);
+        sessionStorage.removeItem("tripmatch_organizer");
+        if (data.sessionId && ORGANIZER_STEPS_PERSIST.has(data.orgStep)) {
+          saveOrganizerState({ sessionId: data.sessionId, orgStep: data.orgStep });
+          return { sessionId: data.sessionId, orgStep: data.orgStep };
+        }
+      }
+    }
+    if (!sessionId || !orgStep || !ORGANIZER_STEPS_PERSIST.has(orgStep)) return null;
+    return { sessionId, orgStep };
   } catch {
     return null;
   }
 }
 
 function clearOrganizerState() {
-  sessionStorage.removeItem(ORGANIZER_STORAGE_KEY);
+  localStorage.removeItem(ORGANIZER_SESSION_KEY);
+  localStorage.removeItem(ORGANIZER_STEP_KEY);
+  try {
+    sessionStorage.removeItem("tripmatch_organizer");
+  } catch {
+    /* old key cleanup */
+  }
 }
 
 function isValidJoinPassword(pw) {
@@ -162,6 +183,26 @@ function isValidJoinPassword(pw) {
 
 function digitsOnly(value, maxLen = 4) {
   return value.replace(/\D/g, "").slice(0, maxLen);
+}
+
+function effectiveGroupSize(c) {
+  return typeof c.size === "number" && !Number.isNaN(c.size) ? c.size : 2;
+}
+
+function effectiveGroupCount(c) {
+  return typeof c.count === "number" && !Number.isNaN(c.count) ? c.count : 1;
+}
+
+function normalizeGroupConfig(groupConfig) {
+  return groupConfig.map((c) => ({
+    ...c,
+    size: effectiveGroupSize(c),
+    count: effectiveGroupCount(c),
+  }));
+}
+
+function configNumDisplay(n) {
+  return typeof n === "number" && !Number.isNaN(n) ? String(n) : "";
 }
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
@@ -223,8 +264,9 @@ function StatusBadge({ status }) {
 function previewGroupNames(groupConfig) {
   const names = [];
   groupConfig.forEach((c) => {
-    for (let i = 0; i < c.count; i++)
-      names.push(c.name ? (c.count === 1 ? c.name : `${c.name}${i + 1}`) : `グループ${names.length + 1}`);
+    const count = effectiveGroupCount(c);
+    for (let i = 0; i < count; i++)
+      names.push(c.name ? (count === 1 ? c.name : `${c.name}${i + 1}`) : `グループ${names.length + 1}`);
   });
   return names;
 }
@@ -234,8 +276,8 @@ function GroupConfigEditor({ groupConfig, setGroupConfig, onChange }) {
     setGroupConfig(next);
     onChange?.();
   };
-  const totalSlots  = groupConfig.reduce((a, c) => a + c.size * c.count, 0);
-  const totalGroups = groupConfig.reduce((a, c) => a + c.count, 0);
+  const totalSlots  = groupConfig.reduce((a, c) => a + effectiveGroupSize(c) * effectiveGroupCount(c), 0);
+  const totalGroups = groupConfig.reduce((a, c) => a + effectiveGroupCount(c), 0);
   const previewNames = previewGroupNames(groupConfig);
 
   return (
@@ -249,13 +291,39 @@ function GroupConfigEditor({ groupConfig, setGroupConfig, onChange }) {
             value={c.name}
             onChange={(e) => update(groupConfig.map((x) => x.id === c.id ? { ...x, name: e.target.value } : x))}
           />
-          <input type="number" min={2} max={20} value={c.size}
-            onChange={(e) => update(groupConfig.map((x) => x.id === c.id ? { ...x, size: parseInt(e.target.value) || 2 } : x))}
-            style={{ ...s.input, width: 56, textAlign: "center", padding: "8px 4px", flexShrink: 0 }} />
+          <input
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            value={configNumDisplay(c.size)}
+            placeholder="2"
+            onChange={(e) => {
+              const raw = digitsOnly(e.target.value, 2);
+              const size = raw === "" ? null : Math.min(20, Math.max(2, parseInt(raw, 10) || 2));
+              update(groupConfig.map((x) => x.id === c.id ? { ...x, size } : x));
+            }}
+            onBlur={() => {
+              if (c.size == null) update(groupConfig.map((x) => x.id === c.id ? { ...x, size: 2 } : x));
+            }}
+            style={{ ...s.input, width: 56, textAlign: "center", padding: "8px 4px", flexShrink: 0 }}
+          />
           <span style={{ color: C.muted, fontSize: 13, whiteSpace: "nowrap" }}>人 ×</span>
-          <input type="number" min={1} max={50} value={c.count}
-            onChange={(e) => update(groupConfig.map((x) => x.id === c.id ? { ...x, count: parseInt(e.target.value) || 1 } : x))}
-            style={{ ...s.input, width: 52, textAlign: "center", padding: "8px 4px", flexShrink: 0 }} />
+          <input
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            value={configNumDisplay(c.count)}
+            placeholder="1"
+            onChange={(e) => {
+              const raw = digitsOnly(e.target.value, 2);
+              const count = raw === "" ? null : Math.min(50, Math.max(1, parseInt(raw, 10) || 1));
+              update(groupConfig.map((x) => x.id === c.id ? { ...x, count } : x));
+            }}
+            onBlur={() => {
+              if (c.count == null) update(groupConfig.map((x) => x.id === c.id ? { ...x, count: 1 } : x));
+            }}
+            style={{ ...s.input, width: 52, textAlign: "center", padding: "8px 4px", flexShrink: 0 }}
+          />
           <button
             onClick={() => update(groupConfig.filter((x) => x.id !== c.id))}
             disabled={groupConfig.length <= 1}
@@ -286,7 +354,7 @@ function GroupConfigEditor({ groupConfig, setGroupConfig, onChange }) {
 }
 
 function totalGroupSlots(groupConfig) {
-  return groupConfig.reduce((a, c) => a + c.size * c.count, 0);
+  return groupConfig.reduce((a, c) => a + effectiveGroupSize(c) * effectiveGroupCount(c), 0);
 }
 
 // ─── Organizer: Setup ──────────────────────────────────────────────────────────
@@ -336,7 +404,7 @@ function OrgSetup({ onStart }) {
             setSetupErr("4桁の数字を設定してください");
             return;
           }
-          onStart(eventName, groupConfig, pin);
+          onStart(eventName, normalizeGroupConfig(groupConfig), pin);
         }}
         style={{ ...s.btn("primary"), width: "100%", padding: 16, fontSize: 16 }}>
         参加URLを発行する →
@@ -381,7 +449,7 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveS
       return;
     }
     setSaving(true); setSettingsErr("");
-    const ok = await onSaveSettings(eventName.trim(), groupConfig);
+    const ok = await onSaveSettings(eventName.trim(), normalizeGroupConfig(groupConfig));
     if (ok) dirtyRef.current = false;
     else setSettingsErr("保存に失敗しました");
     setSaving(false);
