@@ -174,24 +174,81 @@ function StatusBadge({ status }) {
   return <Tag color={color}>{label}</Tag>;
 }
 
+function previewGroupNames(groupConfig) {
+  const names = [];
+  groupConfig.forEach((c) => {
+    for (let i = 0; i < c.count; i++)
+      names.push(c.name ? (c.count === 1 ? c.name : `${c.name}${i + 1}`) : `グループ${names.length + 1}`);
+  });
+  return names;
+}
+
+function GroupConfigEditor({ groupConfig, setGroupConfig, onChange }) {
+  const update = (next) => {
+    setGroupConfig(next);
+    onChange?.();
+  };
+  const totalSlots  = groupConfig.reduce((a, c) => a + c.size * c.count, 0);
+  const totalGroups = groupConfig.reduce((a, c) => a + c.count, 0);
+  const previewNames = previewGroupNames(groupConfig);
+
+  return (
+    <>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>部屋番号・チーム名など名前をつけられます</div>
+      {groupConfig.map((c) => (
+        <div key={c.id} style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
+          <input
+            style={{ ...s.input, padding: "8px 12px" }}
+            placeholder="名前（例: 201号室, Aチーム）"
+            value={c.name}
+            onChange={(e) => update(groupConfig.map((x) => x.id === c.id ? { ...x, name: e.target.value } : x))}
+          />
+          <input type="number" min={2} max={20} value={c.size}
+            onChange={(e) => update(groupConfig.map((x) => x.id === c.id ? { ...x, size: parseInt(e.target.value) || 2 } : x))}
+            style={{ ...s.input, width: 56, textAlign: "center", padding: "8px 4px", flexShrink: 0 }} />
+          <span style={{ color: C.muted, fontSize: 13, whiteSpace: "nowrap" }}>人 ×</span>
+          <input type="number" min={1} max={50} value={c.count}
+            onChange={(e) => update(groupConfig.map((x) => x.id === c.id ? { ...x, count: parseInt(e.target.value) || 1 } : x))}
+            style={{ ...s.input, width: 52, textAlign: "center", padding: "8px 4px", flexShrink: 0 }} />
+          <button
+            onClick={() => update(groupConfig.filter((x) => x.id !== c.id))}
+            disabled={groupConfig.length <= 1}
+            style={{
+              background: "none", border: "none", color: C.red, cursor: groupConfig.length <= 1 ? "not-allowed" : "pointer",
+              fontSize: 20, padding: "0 4px", flexShrink: 0, opacity: groupConfig.length <= 1 ? 0.35 : 1,
+            }}
+          >×</button>
+        </div>
+      ))}
+      <button onClick={() => update([...groupConfig, { id: Date.now(), size: 2, count: 1, name: "" }])}
+        style={{ ...s.btn("ghost"), width: "100%", marginTop: 4 }}>+ 構成を追加</button>
+      <div style={{ marginTop: 16, padding: "12px 16px", background: C.surface2, borderRadius: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+          <span style={{ color: C.muted }}>合計定員</span><span style={{ fontWeight: 700 }}>{totalSlots}人</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+          <span style={{ color: C.muted }}>グループ数</span><span style={{ fontWeight: 700 }}>{totalGroups}グループ</span>
+        </div>
+        {previewNames.length > 0 && (
+          <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {previewNames.map((name, i) => <Tag key={i} color={GROUP_COLORS[i % GROUP_COLORS.length]}>{name}</Tag>)}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function totalGroupSlots(groupConfig) {
+  return groupConfig.reduce((a, c) => a + c.size * c.count, 0);
+}
+
 // ─── Organizer: Setup ──────────────────────────────────────────────────────────
 function OrgSetup({ onStart }) {
   const [eventName, setEventName] = useState("団体旅行2025");
   const [joinPassword, setJoinPassword] = useState("");
   const [setupErr, setSetupErr] = useState("");
   const [groupConfig, setGroupConfig] = useState([{ id: 1, size: 2, count: 2, name: "" }]);
-
-  const totalSlots  = groupConfig.reduce((a, c) => a + c.size * c.count, 0);
-  const totalGroups = groupConfig.reduce((a, c) => a + c.count, 0);
-
-  const previewNames = () => {
-    const names = [];
-    groupConfig.forEach((c) => {
-      for (let i = 0; i < c.count; i++)
-        names.push(c.name ? (c.count === 1 ? c.name : `${c.name}${i + 1}`) : `グループ${names.length + 1}`);
-    });
-    return names;
-  };
 
   return (
     <div>
@@ -207,44 +264,7 @@ function OrgSetup({ onStart }) {
 
       <div style={{ ...s.card, marginBottom: 16 }}>
         <label style={s.label}>グループ構成</label>
-        <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>部屋番号・チーム名など名前をつけられます</div>
-
-        {groupConfig.map((c) => (
-          <div key={c.id} style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
-            <input
-              style={{ ...s.input, padding: "8px 12px" }}
-              placeholder="名前（例: 201号室, Aチーム）"
-              value={c.name}
-              onChange={(e) => setGroupConfig((prev) => prev.map((x) => x.id === c.id ? { ...x, name: e.target.value } : x))}
-            />
-            <input type="number" min={2} max={20} value={c.size}
-              onChange={(e) => setGroupConfig((prev) => prev.map((x) => x.id === c.id ? { ...x, size: parseInt(e.target.value) || 2 } : x))}
-              style={{ ...s.input, width: 56, textAlign: "center", padding: "8px 4px", flexShrink: 0 }} />
-            <span style={{ color: C.muted, fontSize: 13, whiteSpace: "nowrap" }}>人 ×</span>
-            <input type="number" min={1} max={50} value={c.count}
-              onChange={(e) => setGroupConfig((prev) => prev.map((x) => x.id === c.id ? { ...x, count: parseInt(e.target.value) || 1 } : x))}
-              style={{ ...s.input, width: 52, textAlign: "center", padding: "8px 4px", flexShrink: 0 }} />
-            <button onClick={() => setGroupConfig((prev) => prev.filter((x) => x.id !== c.id))}
-              style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 20, padding: "0 4px", flexShrink: 0 }}>×</button>
-          </div>
-        ))}
-
-        <button onClick={() => setGroupConfig((prev) => [...prev, { id: Date.now(), size: 2, count: 1, name: "" }])}
-          style={{ ...s.btn("ghost"), width: "100%", marginTop: 4 }}>+ 構成を追加</button>
-
-        <div style={{ marginTop: 16, padding: "12px 16px", background: C.surface2, borderRadius: 10 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
-            <span style={{ color: C.muted }}>合計定員</span><span style={{ fontWeight: 700 }}>{totalSlots}人</span>
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-            <span style={{ color: C.muted }}>グループ数</span><span style={{ fontWeight: 700 }}>{totalGroups}グループ</span>
-          </div>
-          {previewNames().length > 0 && (
-            <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {previewNames().map((name, i) => <Tag key={i} color={GROUP_COLORS[i % GROUP_COLORS.length]}>{name}</Tag>)}
-            </div>
-          )}
-        </div>
+        <GroupConfigEditor groupConfig={groupConfig} setGroupConfig={setGroupConfig} />
       </div>
 
       <div style={{ ...s.card, marginBottom: 16 }}>
@@ -280,13 +300,45 @@ function OrgSetup({ onStart }) {
 }
 
 // ─── Organizer: Dashboard ──────────────────────────────────────────────────────
-function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset }) {
+function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveSettings }) {
   const [copied, setCopied] = useState(false);
+  const [eventName, setEventName] = useState(session.eventName);
+  const [groupConfig, setGroupConfig] = useState(session.groupConfig);
+  const [settingsErr, setSettingsErr] = useState("");
+  const [saving, setSaving] = useState(false);
+  const dirtyRef = useRef(false);
   const origin = window.location.origin + window.location.pathname;
   const participantUrl = `${origin}?join=${sessionId}`;
+  const participantCount = (session.participants || []).length;
+
+  useEffect(() => {
+    if (!dirtyRef.current) {
+      setEventName(session.eventName);
+      setGroupConfig(session.groupConfig);
+    }
+  }, [session.eventName, session.groupConfig]);
+
+  const markDirty = () => { dirtyRef.current = true; };
 
   const copy = () => {
     navigator.clipboard.writeText(participantUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+  };
+
+  const saveSettings = async () => {
+    if (!eventName.trim()) {
+      setSettingsErr("イベント名を入力してください");
+      return;
+    }
+    const slots = totalGroupSlots(groupConfig);
+    if (slots < participantCount) {
+      setSettingsErr(`合計定員（${slots}人）は参加者数（${participantCount}人）以上にしてください`);
+      return;
+    }
+    setSaving(true); setSettingsErr("");
+    const ok = await onSaveSettings(eventName.trim(), groupConfig);
+    if (ok) dirtyRef.current = false;
+    else setSettingsErr("保存に失敗しました");
+    setSaving(false);
   };
 
   const submitted = (session.participants || []).filter((p) => p.submitted);
@@ -296,10 +348,18 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
         <div>
           <div style={{ fontSize: 11, letterSpacing: 3, color: C.accent, marginBottom: 4 }}>ORGANIZER</div>
-          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 900 }}>{session.eventName}</h2>
           <div style={{ marginTop: 6 }}><StatusBadge status={session.status} /></div>
         </div>
         <button onClick={onRefresh} style={{ ...s.btn("ghost"), padding: "8px 14px", fontSize: 13 }}>↻ 更新</button>
+      </div>
+
+      <div style={{ ...s.card, marginBottom: 16 }}>
+        <label style={s.label}>イベント名</label>
+        <input
+          style={s.input}
+          value={eventName}
+          onChange={(e) => { setEventName(e.target.value); markDirty(); setSettingsErr(""); }}
+        />
       </div>
 
       <div style={{ ...s.card, marginBottom: 16, borderColor: C.accent + "40" }}>
@@ -364,25 +424,26 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset }) {
         )}
       </div>
 
-      <div style={{ ...s.card, marginBottom: 20 }}>
+      <div style={{ ...s.card, marginBottom: 16 }}>
         <label style={s.label}>グループ構成</label>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          {session.groupConfig.map((c, gi) =>
-            Array.from({ length: c.count }, (_, i) => {
-              const name = c.name ? (c.count === 1 ? c.name : `${c.name}${i + 1}`) : `グループ${gi * c.count + i + 1}`;
-              const color = GROUP_COLORS[(gi * 10 + i) % GROUP_COLORS.length];
-              return (
-                <div key={`${gi}-${i}`} style={{
-                  background: C.surface2, borderRadius: 8, padding: "8px 14px",
-                  fontSize: 13, border: `1px solid ${color}40`,
-                }}>
-                  <span style={{ color, fontWeight: 700 }}>{name}</span>
-                  <span style={{ color: C.muted, marginLeft: 6 }}>{c.size}人</span>
-                </div>
-              );
-            })
-          )}
-        </div>
+        {participantCount > 0 && (
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>
+            参加者 {participantCount} 人 — 合計定員は参加者数以上にしてください
+          </div>
+        )}
+        <GroupConfigEditor
+          groupConfig={groupConfig}
+          setGroupConfig={setGroupConfig}
+          onChange={() => { markDirty(); setSettingsErr(""); }}
+        />
+        {settingsErr && <div style={{ color: C.red, fontSize: 13, marginTop: 10 }}>{settingsErr}</div>}
+        <button
+          onClick={saveSettings}
+          disabled={saving}
+          style={{ ...s.btn("primary"), width: "100%", marginTop: 14, opacity: saving ? 0.6 : 1 }}
+        >
+          {saving ? "保存中..." : "構成を保存"}
+        </button>
       </div>
 
       <div style={{ display: "flex", gap: 10 }}>
@@ -814,6 +875,19 @@ export default function App() {
     setSessionId(id); setSession(newSession); setOrgStep("dashboard");
   };
 
+  const handleSaveSettings = async (eventName, groupConfig) => {
+    const s = await loadSession(sessionId);
+    if (!s) return false;
+    const slots = totalGroupSlots(groupConfig);
+    const n = (s.participants || []).length;
+    if (slots < n) return false;
+    s.eventName = eventName;
+    s.groupConfig = groupConfig;
+    await saveSession(sessionId, s);
+    setSession(s);
+    return true;
+  };
+
   const handleMatch = async () => {
     const s = await loadSession(sessionId);
     if (!s || (s.participants || []).length < 2) return;
@@ -870,7 +944,7 @@ export default function App() {
         {mode === "organizer" && (
           <>
             {orgStep === "setup"     && <OrgSetup onStart={handleStart} />}
-            {orgStep === "dashboard" && session && <OrgDashboard session={session} sessionId={sessionId} onRefresh={refreshSession} onMatch={handleMatch} onReset={handleReset} />}
+            {orgStep === "dashboard" && session && <OrgDashboard session={session} sessionId={sessionId} onRefresh={refreshSession} onMatch={handleMatch} onReset={handleReset} onSaveSettings={handleSaveSettings} />}
             {orgStep === "result"    && session?.result && <OrgResult session={session} onReset={handleReset} />}
           </>
         )}
