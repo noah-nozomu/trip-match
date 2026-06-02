@@ -109,6 +109,52 @@ async function deleteSession(sessionId) {
 }
 
 const unlockKey = (sessionId) => `tripmatch_unlock_${sessionId}`;
+const participantKey = (sessionId) => `tripmatch_participant_${sessionId}`;
+
+function saveParticipantIdentity(sessionId, { myId, myName }) {
+  sessionStorage.setItem(
+    participantKey(sessionId),
+    JSON.stringify({ sessionId, myId, myName }),
+  );
+}
+
+function loadParticipantIdentity(sessionId) {
+  try {
+    const raw = sessionStorage.getItem(participantKey(sessionId));
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (data.sessionId !== sessionId || !data.myId || !data.myName) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function clearParticipantIdentity(sessionId) {
+  sessionStorage.removeItem(participantKey(sessionId));
+}
+
+const ORGANIZER_STORAGE_KEY = "tripmatch_organizer";
+
+function saveOrganizerState({ sessionId, orgStep }) {
+  sessionStorage.setItem(ORGANIZER_STORAGE_KEY, JSON.stringify({ sessionId, orgStep }));
+}
+
+function loadOrganizerState() {
+  try {
+    const raw = sessionStorage.getItem(ORGANIZER_STORAGE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data.sessionId || !data.orgStep) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function clearOrganizerState() {
+  sessionStorage.removeItem(ORGANIZER_STORAGE_KEY);
+}
 
 function isValidJoinPassword(pw) {
   return /^\d{4}$/.test(pw);
@@ -350,7 +396,10 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveS
           <div style={{ fontSize: 11, letterSpacing: 3, color: C.accent, marginBottom: 4 }}>ORGANIZER</div>
           <div style={{ marginTop: 6 }}><StatusBadge status={session.status} /></div>
         </div>
-        <button onClick={onRefresh} style={{ ...s.btn("ghost"), padding: "8px 14px", fontSize: 13 }}>↻ 更新</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={onRefresh} style={{ ...s.btn("ghost"), padding: "8px 14px", fontSize: 13 }}>↻ 更新</button>
+          <button onClick={onReset} style={{ ...s.btn("danger"), padding: "8px 14px", fontSize: 13 }}>リセット</button>
+        </div>
       </div>
 
       <div style={{ ...s.card, marginBottom: 16 }}>
@@ -447,12 +496,11 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveS
       </div>
 
       <div style={{ display: "flex", gap: 10 }}>
-        <button onClick={onReset} style={{ ...s.btn("ghost"), flex: 1 }}>最初から</button>
         <button
           onClick={onMatch}
           disabled={(session.participants || []).length < 2}
           style={{
-            ...s.btn("teal"), flex: 2, padding: 14, fontSize: 15,
+            ...s.btn("teal"), width: "100%", padding: 14, fontSize: 15,
             opacity: (session.participants || []).length < 2 ? 0.5 : 1,
           }}
         >
@@ -520,46 +568,113 @@ function OrgResult({ session, onReset }) {
         })}
       </div>
 
-      <button onClick={onReset} style={{ ...s.btn("ghost"), width: "100%" }}>← 新しいセッションを作る</button>
+      <button onClick={onReset} style={{ ...s.btn("danger"), width: "100%" }}>リセット（セッションを削除して最初から）</button>
     </div>
   );
 }
 
 // ─── Participant View ──────────────────────────────────────────────────────────
 function ParticipantView({ sessionId }) {
+  const savedIdentity = loadParticipantIdentity(sessionId);
   const [session,     setSession]     = useState(null);
-  const [myName,      setMyName]      = useState("");
-  const [myId,        setMyId]        = useState(null);
+  const [myName,      setMyName]      = useState(savedIdentity?.myName ?? "");
+  const [myId,        setMyId]        = useState(savedIdentity?.myId ?? null);
   const [preferences, setPreferences] = useState([]);
   const [passwordInput, setPasswordInput] = useState("");
   const [unlocked, setUnlocked] = useState(() => !!sessionStorage.getItem(unlockKey(sessionId)));
-  const [step,        setStep]        = useState(() =>
-    sessionStorage.getItem(unlockKey(sessionId)) ? "join" : "password"
-  );
+  const [step, setStep] = useState(() => {
+    if (!sessionStorage.getItem(unlockKey(sessionId))) return "password";
+    if (savedIdentity?.myId) return "restore";
+    return "join";
+  });
   const [loading,     setLoading]     = useState(false);
   const [err,         setErr]         = useState("");
   const pollRef = useRef(null);
+  const restoredRef = useRef(false);
+
+  const applyParticipantFromSession = useCallback((s, participant) => {
+    setMyId(participant.id);
+    setMyName(participant.name);
+    setPreferences(participant.preferences || []);
+    setSession(s);
+    saveParticipantIdentity(sessionId, {
+      myId: participant.id,
+      myName: participant.name,
+    });
+    if (s.status === "matched") setStep("result");
+    else if (participant.submitted) setStep("done");
+    else setStep("vote");
+  }, [sessionId]);
 
   const refresh = useCallback(async () => {
     if (!unlocked) return;
     const s = await loadSession(sessionId);
     if (s) {
       setSession(s);
-      if (s.status === "matched" && step !== "password") setStep("result");
+      if (s.status === "matched") {
+        setStep((prev) => (prev === "password" ? prev : "result"));
+        return;
+      }
+      if (myId) {
+        const me = (s.participants || []).find((p) => p.id === myId);
+        if (!me) {
+          clearParticipantIdentity(sessionId);
+          setMyId(null);
+          setMyName("");
+          setPreferences([]);
+          setStep("join");
+          return;
+        }
+        setPreferences((prev) =>
+          prev.filter((id) => (s.participants || []).some((p) => p.id === id)),
+        );
+      }
     } else {
       setSession(null);
       setStep("password");
       setUnlocked(false);
+      setMyId(null);
+      setMyName("");
+      setPreferences([]);
       sessionStorage.removeItem(unlockKey(sessionId));
+      clearParticipantIdentity(sessionId);
     }
-  }, [sessionId, unlocked, step]);
+  }, [sessionId, unlocked, myId]);
 
   useEffect(() => {
-    if (!unlocked) return;
+    if (!unlocked || restoredRef.current) return;
+    const saved = loadParticipantIdentity(sessionId);
+    if (!saved?.myId) return;
+    restoredRef.current = true;
+
+    (async () => {
+      const s = await loadSession(sessionId);
+      if (!s) {
+        clearParticipantIdentity(sessionId);
+        restoredRef.current = false;
+        setStep("password");
+        setUnlocked(false);
+        sessionStorage.removeItem(unlockKey(sessionId));
+        return;
+      }
+      const me = (s.participants || []).find((p) => p.id === saved.myId);
+      if (!me) {
+        clearParticipantIdentity(sessionId);
+        setMyId(null);
+        setMyName("");
+        setStep("join");
+        return;
+      }
+      applyParticipantFromSession(s, me);
+    })();
+  }, [unlocked, sessionId, applyParticipantFromSession]);
+
+  useEffect(() => {
+    if (!unlocked || step === "restore") return;
     refresh();
     pollRef.current = setInterval(refresh, 4000);
     return () => clearInterval(pollRef.current);
-  }, [refresh, unlocked]);
+  }, [refresh, unlocked, step]);
 
   const verifyPassword = async () => {
     const pin = digitsOnly(passwordInput);
@@ -574,21 +689,24 @@ function ParticipantView({ sessionId }) {
       setLoading(false);
       return;
     }
-    if (!s.joinPassword) {
-      sessionStorage.setItem(unlockKey(sessionId), "1");
-      setUnlocked(true);
-      setSession(s);
-      setStep(s.status === "matched" ? "result" : "join");
-      setLoading(false);
-      return;
-    }
-    if (pin !== s.joinPassword) {
+    if (s.joinPassword && pin !== s.joinPassword) {
       setErr("パスワードが正しくありません");
       setLoading(false);
       return;
     }
     sessionStorage.setItem(unlockKey(sessionId), "1");
     setUnlocked(true);
+    restoredRef.current = true;
+    const saved = loadParticipantIdentity(sessionId);
+    if (saved?.myId) {
+      const me = (s.participants || []).find((p) => p.id === saved.myId);
+      if (me) {
+        applyParticipantFromSession(s, me);
+        setLoading(false);
+        return;
+      }
+      clearParticipantIdentity(sessionId);
+    }
     setSession(s);
     setStep(s.status === "matched" ? "result" : "join");
     setLoading(false);
@@ -601,18 +719,16 @@ function ParticipantView({ sessionId }) {
     if (!s) { setErr("セッションが見つかりません"); setLoading(false); return; }
     const existing = (s.participants || []).find((p) => p.name === myName.trim());
     if (existing) {
-      setMyId(existing.id);
-      setPreferences(existing.preferences || []);
-      setSession(s);
-      setStep(existing.submitted ? "done" : "vote");
-      setLoading(false); return;
+      applyParticipantFromSession(s, existing);
+      setLoading(false);
+      return;
     }
     const newId = `p_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const newParticipant = { id: newId, name: myName.trim(), preferences: [], submitted: false };
     if (!s.participants) s.participants = [];
     s.participants.push(newParticipant);
     await saveSession(sessionId, s);
-    setMyId(newId); setSession(s); setStep("vote");
+    applyParticipantFromSession(s, newParticipant);
     setLoading(false);
   };
 
@@ -625,7 +741,7 @@ function ParticipantView({ sessionId }) {
       s.participants[idx].preferences = preferences;
       s.participants[idx].submitted   = true;
       await saveSession(sessionId, s);
-      setSession(s); setStep("done");
+      applyParticipantFromSession(s, s.participants[idx]);
     }
     setLoading(false);
   };
@@ -649,6 +765,13 @@ function ParticipantView({ sessionId }) {
     if (j < 0 || j >= arr.length) return arr;
     [arr[i], arr[j]] = [arr[j], arr[i]]; return arr;
   });
+
+  if (step === "restore") return (
+    <div style={{ textAlign: "center", padding: 60, color: C.muted }}>
+      <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
+      <div>参加情報を復元しています...</div>
+    </div>
+  );
 
   if (step === "password") return (
     <div>
@@ -739,7 +862,7 @@ function ParticipantView({ sessionId }) {
   }
 
   // ── Done ──
-  if (step === "done") return (
+  if (step === "done" && session.status !== "matched") return (
     <div style={{ textAlign: "center", padding: "32px 0" }}>
       <div style={{ fontSize: 56, marginBottom: 16 }}>✅</div>
       <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 8 }}>希望を提出しました！</div>
@@ -758,12 +881,21 @@ function ParticipantView({ sessionId }) {
               );
             })}
       </div>
+      <button
+        onClick={() => setStep("vote")}
+        style={{ ...s.btn("ghost"), width: "100%", marginTop: 20 }}
+      >
+        希望を編集する
+      </button>
       <div style={{ marginTop: 16, color: C.muted, fontSize: 12 }}>このページを開いたままにしておくと結果が自動で表示されます</div>
     </div>
   );
 
   // ── Vote ──
-  if (step === "vote") return (
+  if (step === "vote") {
+    const me = (session.participants || []).find((p) => p.id === myId);
+    const isUpdate = !!me?.submitted;
+    return (
     <div>
       <div style={{ marginBottom: 24 }}>
         <div style={{ fontSize: 11, letterSpacing: 3, color: C.accent, marginBottom: 4 }}>PARTICIPANT</div>
@@ -807,10 +939,11 @@ function ParticipantView({ sessionId }) {
         </div>
       </div>
       <button onClick={submitPrefs} disabled={loading} style={{ ...s.btn("primary"), width: "100%", padding: 16, fontSize: 15 }}>
-        {loading ? "送信中..." : "希望を提出する →"}
+        {loading ? "送信中..." : isUpdate ? "希望を更新する →" : "希望を提出する →"}
       </button>
     </div>
-  );
+    );
+  }
 
   // ── Join ──
   return (
@@ -841,29 +974,73 @@ function generateSessionId() {
 export default function App() {
   const params    = new URLSearchParams(window.location.search);
   const joinParam = params.get("join");
+  const savedOrganizer = !joinParam ? loadOrganizerState() : null;
 
   const [mode,    setMode]    = useState(joinParam ? "participant" : "organizer");
-  const [orgStep, setOrgStep] = useState("setup");
-  const [sessionId, setSessionId] = useState(joinParam || null);
+  const [orgStep, setOrgStep] = useState(
+    savedOrganizer?.sessionId ? savedOrganizer.orgStep : "setup",
+  );
+  const [sessionId, setSessionId] = useState(joinParam || savedOrganizer?.sessionId || null);
   const [session,   setSession]   = useState(null);
+  const [orgRestoring, setOrgRestoring] = useState(
+    !joinParam && !!savedOrganizer?.sessionId,
+  );
   const pollRef = useRef(null);
+  const orgRestoredRef = useRef(false);
 
   const refreshSession = useCallback(async () => {
     if (!sessionId) return;
     const s = await loadSession(sessionId);
     if (s) {
       setSession(s);
-      if (s.status === "matched" && orgStep === "dashboard") setOrgStep("result");
+      if (s.status === "matched") {
+        setOrgStep((prev) => {
+          if (prev !== "result") saveOrganizerState({ sessionId, orgStep: "result" });
+          return "result";
+        });
+      }
     }
-  }, [sessionId, orgStep]);
+  }, [sessionId]);
 
   useEffect(() => {
-    if (sessionId && mode === "organizer") {
+    if (joinParam || orgRestoredRef.current || !orgRestoring || !sessionId) return;
+    orgRestoredRef.current = true;
+
+    (async () => {
+      const s = await loadSession(sessionId);
+      if (!s) {
+        clearOrganizerState();
+        setSessionId(null);
+        setOrgStep("setup");
+        setOrgRestoring(false);
+        return;
+      }
+      setSession(s);
+      let step = savedOrganizer?.orgStep || "dashboard";
+      if (s.status === "matched") step = "result";
+      else if (step === "result") step = "dashboard";
+      setOrgStep(step);
+      saveOrganizerState({ sessionId, orgStep: step });
+      setOrgRestoring(false);
+    })();
+  }, [joinParam, orgRestoring, sessionId, savedOrganizer?.orgStep]);
+
+  useEffect(() => {
+    if (mode !== "organizer") return;
+    if (!sessionId || orgStep === "setup") {
+      if (!sessionId) clearOrganizerState();
+      return;
+    }
+    saveOrganizerState({ sessionId, orgStep });
+  }, [mode, sessionId, orgStep]);
+
+  useEffect(() => {
+    if (sessionId && mode === "organizer" && !orgRestoring) {
       refreshSession();
       pollRef.current = setInterval(refreshSession, 4000);
       return () => clearInterval(pollRef.current);
     }
-  }, [sessionId, mode, refreshSession]);
+  }, [sessionId, mode, refreshSession, orgRestoring]);
 
   const handleStart = async (eventName, groupConfig, joinPassword) => {
     const id = generateSessionId();
@@ -902,10 +1079,14 @@ export default function App() {
     if (sessionId) {
       await deleteSession(sessionId);
       sessionStorage.removeItem(unlockKey(sessionId));
+      clearParticipantIdentity(sessionId);
     }
+    clearOrganizerState();
     setSessionId(null);
     setSession(null);
     setOrgStep("setup");
+    setOrgRestoring(false);
+    orgRestoredRef.current = false;
   };
 
   return (
@@ -941,7 +1122,13 @@ export default function App() {
       )}
 
       <div style={{ maxWidth: 680, margin: "0 auto", padding: "24px 16px" }}>
-        {mode === "organizer" && (
+        {mode === "organizer" && orgRestoring && (
+          <div style={{ textAlign: "center", padding: 60, color: C.muted }}>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
+            <div>幹事セッションを復元しています...</div>
+          </div>
+        )}
+        {mode === "organizer" && !orgRestoring && (
           <>
             {orgStep === "setup"     && <OrgSetup onStart={handleStart} />}
             {orgStep === "dashboard" && session && <OrgDashboard session={session} sessionId={sessionId} onRefresh={refreshSession} onMatch={handleMatch} onReset={handleReset} onSaveSettings={handleSaveSettings} />}
