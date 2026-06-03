@@ -1,91 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { ref, set, get, remove } from "firebase/database";
 import { db } from "./firebase";
-
-// ─── Matching Algorithm ────────────────────────────────────────────────────────
-function runMatching(participants, groupConfig) {
-  groupConfig = normalizeGroupConfig(groupConfig);
-  const ids = participants.map((p) => p.id);
-  const n = participants.length;
-
-  const affinity = {};
-  ids.forEach((a) => { affinity[a] = {}; ids.forEach((b) => { affinity[a][b] = 0; }); });
-  participants.forEach((p) => {
-    (p.preferences || []).forEach((prefId, idx) => {
-      if (affinity[p.id][prefId] !== undefined) {
-        const s = n - idx;
-        affinity[p.id][prefId] += s;
-        affinity[prefId][p.id] += s;
-      }
-    });
-  });
-
-  const edges = [];
-  for (let i = 0; i < ids.length; i++)
-    for (let j = i + 1; j < ids.length; j++) {
-      const a = ids[i], b = ids[j];
-      const score = affinity[a][b] + affinity[b][a];
-      if (score > 0) edges.push({ a, b, score });
-    }
-  edges.sort((x, y) => y.score - x.score);
-
-  // Expand config into named slots
-  const slots = [];
-  groupConfig.forEach((c) => {
-    for (let i = 0; i < c.count; i++) {
-      const name = c.name
-        ? c.count === 1 ? c.name : `${c.name}${i + 1}`
-        : `グループ${slots.length + 1}`;
-      slots.push({ size: c.size, name });
-    }
-  });
-
-  const group = {};
-  ids.forEach((id) => { group[id] = null; });
-  const groups = slots.map((s) => ({ members: new Set(), slotSize: s.size, name: s.name }));
-
-  const getFreeSlot = () => groups.findIndex((g) => g.members.size < g.slotSize);
-
-  for (const { a, b } of edges) {
-    const ga = group[a], gb = group[b];
-    if (ga === null && gb === null) {
-      const sl = getFreeSlot();
-      if (sl === -1) continue;
-      if (groups[sl].slotSize >= 2) { groups[sl].members.add(a); groups[sl].members.add(b); group[a] = sl; group[b] = sl; }
-    } else if (ga === null && gb !== null) {
-      if (groups[gb].members.size < groups[gb].slotSize) { groups[gb].members.add(a); group[a] = gb; }
-    } else if (ga !== null && gb === null) {
-      if (groups[ga].members.size < groups[ga].slotSize) { groups[ga].members.add(b); group[b] = ga; }
-    } else if (ga !== gb) {
-      const combined = groups[ga].members.size + groups[gb].members.size;
-      if (combined <= groups[ga].slotSize) {
-        groups[gb].members.forEach((id) => { groups[ga].members.add(id); group[id] = ga; });
-        groups[gb].members = new Set();
-      }
-    }
-  }
-
-  ids.filter((id) => group[id] === null).forEach((id) => {
-    const sl = getFreeSlot();
-    if (sl !== -1) { groups[sl].members.add(id); group[id] = sl; }
-    else { const last = groups.length - 1; groups[last].members.add(id); group[id] = last; }
-  });
-
-  const result = groups.filter((g) => g.members.size > 0)
-    .map((g) => ({ members: [...g.members], name: g.name }));
-
-  const satisfaction = participants.map((p) => {
-    const grp = result.find((g) => g.members.includes(p.id));
-    const matched = grp ? (p.preferences || []).filter((pref) => grp.members.includes(pref)) : [];
-    const score = matched.reduce((acc, pref) => {
-      const idx = (p.preferences || []).indexOf(pref);
-      return acc + (n - idx);
-    }, 0);
-    return { id: p.id, score, matched };
-  });
-
-  return { groups: result, satisfaction };
-}
+import {
+  runMatching,
+  normalizeGroupConfig,
+  totalGroupSlots,
+  effectiveGroupSize,
+  effectiveGroupCount,
+} from "./matching";
 
 // ─── Firebase helpers ──────────────────────────────────────────────────────────
 async function saveSession(sessionId, data) {
@@ -183,22 +105,6 @@ function isValidJoinPassword(pw) {
 
 function digitsOnly(value, maxLen = 4) {
   return value.replace(/\D/g, "").slice(0, maxLen);
-}
-
-function effectiveGroupSize(c) {
-  return typeof c.size === "number" && !Number.isNaN(c.size) ? c.size : 2;
-}
-
-function effectiveGroupCount(c) {
-  return typeof c.count === "number" && !Number.isNaN(c.count) ? c.count : 1;
-}
-
-function normalizeGroupConfig(groupConfig) {
-  return groupConfig.map((c) => ({
-    ...c,
-    size: effectiveGroupSize(c),
-    count: effectiveGroupCount(c),
-  }));
 }
 
 function configNumDisplay(n) {
@@ -351,10 +257,6 @@ function GroupConfigEditor({ groupConfig, setGroupConfig, onChange }) {
       </div>
     </>
   );
-}
-
-function totalGroupSlots(groupConfig) {
-  return groupConfig.reduce((a, c) => a + effectiveGroupSize(c) * effectiveGroupCount(c), 0);
 }
 
 // ─── Organizer: Setup ──────────────────────────────────────────────────────────
