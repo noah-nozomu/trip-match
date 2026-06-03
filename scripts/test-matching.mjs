@@ -42,6 +42,12 @@ function validate(participants, groupConfig, result) {
         g.members.length <= g.slotSize,
         `slotSize超過: ${g.name} ${g.members.length} > ${g.slotSize}`,
       );
+      if (participants.length === capacity) {
+        assert(
+          g.members.length === g.slotSize,
+          `定員と一致しない: ${g.name} ${g.members.length} ≠ ${g.slotSize}`,
+        );
+      }
     }
     for (const id of g.members) {
       assert(!assigned.has(id), `重複割当: ${id}`);
@@ -86,17 +92,41 @@ console.log("TripMatch マッチングアルゴリズム テスト\n");
   assert(groups.length === 4, `グループ数は4つ: ${groups.length}`);
 }
 
-// 2. 旧バグ再現: 2人×4 + 3人×1, 9人 → 4人グループが出ない
+// 2. 旧バグ再現: 2人×4 + 3人×1, 9人 → 定員ぴったり・4人グループなし
 {
   const config = [{ size: 2, count: 4 }, { size: 3, count: 1 }];
   const participants = makeParticipants(9);
   const { groups } = runMatching(participants, config);
   console.log("2. 旧バグケース（2人枠に4人が入らない）");
+  const sizes = groups.map((g) => g.members.length).sort((a, b) => a - b);
+  console.log(`   グループ人数: [${sizes.join(", ")}]`);
   for (const g of groups) {
-    console.log(`   ${g.name}: ${g.members.length}人 (上限${g.slotSize})`);
-    assert(g.members.length <= 2 || g.slotSize === 3, `${g.name} が4人以上`);
+    assert(g.members.length === g.slotSize, `${g.name} が定員と不一致`);
     assert(g.members.length <= 3, `${g.name} が定員超過`);
   }
+  assert(!sizes.some((s) => s >= 4), "4人以上のグループが存在");
+  validate(participants, config, { groups });
+}
+
+// 2b. 4人相互希望クラスター → 4人スロットへ
+{
+  const config = [{ size: 4, count: 1 }, { size: 2, count: 2 }];
+  const participants = [
+    { id: "a", name: "A", preferences: ["b", "c", "d"], submitted: true },
+    { id: "b", name: "B", preferences: ["a", "c", "d"], submitted: true },
+    { id: "c", name: "C", preferences: ["a", "b", "d"], submitted: true },
+    { id: "d", name: "D", preferences: ["a", "b", "c"], submitted: true },
+    { id: "e", name: "E", preferences: ["f"], submitted: true },
+    { id: "f", name: "F", preferences: ["e"], submitted: true },
+  ];
+  const { groups } = runMatching(participants, config);
+  console.log("2b. 4人クラスター → 4人スロット");
+  const four = groups.find((g) => g.slotSize === 4);
+  assert(four && four.members.length === 4, "4人スロットに4人");
+  assert(
+    ["a", "b", "c", "d"].every((id) => four.members.includes(id)),
+    "相互希望4人が同一グループ",
+  );
   validate(participants, config, { groups });
 }
 
