@@ -482,7 +482,7 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveS
 }
 
 // ─── Organizer: Result ─────────────────────────────────────────────────────────
-function OrgResult({ session, onReset }) {
+function OrgResult({ session, onReset, onRematch }) {
   const { groups, satisfaction } = session.result;
   const getName = (id) => (session.participants || []).find((p) => p.id === id)?.name || id;
   const getSat  = (id) => satisfaction.find((s) => s.id === id);
@@ -538,6 +538,12 @@ function OrgResult({ session, onReset }) {
         })}
       </div>
 
+      <button
+        onClick={onRematch}
+        style={{ ...s.btn("teal"), width: "100%", marginBottom: 12, padding: 14, fontSize: 15 }}
+      >
+        もう一度マッチングする
+      </button>
       <button onClick={onReset} style={{ ...s.btn("danger"), width: "100%" }}>リセット（セッションを削除して最初から）</button>
     </div>
   );
@@ -597,6 +603,7 @@ function ParticipantView({ sessionId }) {
           setStep("join");
           return;
         }
+        setStep(me.submitted ? "done" : "vote");
         setPreferences((prev) =>
           prev.filter((id) => (s.participants || []).some((p) => p.id === id)),
         );
@@ -1060,6 +1067,20 @@ export default function App() {
     setOrgStep("result");
   };
 
+  const handleRematch = async () => {
+    const s = await loadSession(sessionId);
+    if (!s) return;
+    const participants = s.participants || [];
+    const allSubmitted =
+      participants.length > 0 && participants.every((p) => p.submitted);
+    s.status = allSubmitted ? "ready" : "waiting";
+    s.result = null;
+    await saveSession(sessionId, s);
+    saveOrganizerState({ sessionId, orgStep: "dashboard" });
+    setSession(s);
+    setOrgStep("dashboard");
+  };
+
   const handleReset = async () => {
     if (sessionId) {
       await deleteSession(sessionId);
@@ -1116,7 +1137,7 @@ export default function App() {
           <>
             {orgStep === "setup"     && <OrgSetup onStart={handleStart} />}
             {orgStep === "dashboard" && session && <OrgDashboard session={session} sessionId={sessionId} onRefresh={refreshSession} onMatch={handleMatch} onReset={handleReset} onSaveSettings={handleSaveSettings} />}
-            {orgStep === "result"    && session?.result && <OrgResult session={session} onReset={handleReset} />}
+            {orgStep === "result"    && session?.result && <OrgResult session={session} onReset={handleReset} onRematch={handleRematch} />}
           </>
         )}
         {mode === "participant" && sessionId  && <ParticipantView sessionId={sessionId} />}

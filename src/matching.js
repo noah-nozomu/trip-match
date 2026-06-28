@@ -156,6 +156,13 @@ function slotFree(gi, groups) {
   return groups[gi].slotSize - groups[gi].members.length;
 }
 
+function findSlotWithSpace(groups) {
+  for (let i = 0; i < groups.length; i++) {
+    if (slotFree(i, groups) > 0) return i;
+  }
+  return -1;
+}
+
 function findSlotWithMostSpace(groups) {
   let best = -1;
   let bestFree = 0;
@@ -167,6 +174,25 @@ function findSlotWithMostSpace(groups) {
     }
   }
   return bestFree > 0 ? best : -1;
+}
+
+function forceAssignAll(groups, ids) {
+  const placed = new Set();
+  groups.forEach((g) => g.members.forEach((id) => placed.add(id)));
+
+  for (const id of ids) {
+    if (placed.has(id)) continue;
+    const gi = findSlotWithMostSpace(groups);
+    if (gi < 0) {
+      const fallback = findSlotWithSpace(groups);
+      if (fallback < 0) break;
+      groups[fallback].members.push(id);
+      placed.add(id);
+      continue;
+    }
+    groups[gi].members.push(id);
+    placed.add(id);
+  }
 }
 
 function pickBestSubset(pool, k, affinity) {
@@ -311,13 +337,15 @@ export function runMatching(participants, groupConfig) {
   // Step3〜5: クラスター優先でスロットに割当し、定員ぴったりに再パック
   let remaining = repackSlotsExactly(groups, ids, affinity, clusters);
 
-  // Step4: 余った参加者を空きが多いスロットへ（定員超過しない）
+  // Step4: 余った参加者を空きスロットへ（定員超過しない）
   remaining = shuffleArray(remaining);
   for (const id of remaining) {
     const gi = findSlotWithMostSpace(groups);
     if (gi < 0) break;
-    if (slotFree(gi, groups) > 0) groups[gi].members.push(id);
+    groups[gi].members.push(id);
   }
+
+  forceAssignAll(groups, ids);
 
   for (let gi = 0; gi < groups.length; gi++) {
     if (groups[gi].members.length > groups[gi].slotSize) {
@@ -326,7 +354,7 @@ export function runMatching(participants, groupConfig) {
   }
 
   const result = groups
-    .filter((g) => g.members.length === g.slotSize)
+    .filter((g) => g.members.length > 0)
     .map((g) => ({
       members: [...g.members],
       name: g.name,

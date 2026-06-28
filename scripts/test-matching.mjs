@@ -180,6 +180,77 @@ console.log("TripMatch マッチングアルゴリズム テスト\n");
   validate(participants, config, { groups });
 }
 
+// 6. 再マッチング: データ保持・status/result リセット・再実行
+{
+  console.log("6. 再マッチング（データ保持・再実行）");
+  const config = [{ size: 2, count: 2 }];
+  const participants = [
+    { id: "a", name: "A", preferences: ["b"], submitted: true },
+    { id: "b", name: "B", preferences: ["a"], submitted: true },
+    { id: "c", name: "C", preferences: ["d"], submitted: true },
+    { id: "d", name: "D", preferences: ["c"], submitted: true },
+  ];
+  const session = {
+    eventName: "テスト",
+    groupConfig: config,
+    participants: JSON.parse(JSON.stringify(participants)),
+    joinPassword: "1234",
+    status: "matched",
+    result: runMatching(participants, config),
+  };
+  const beforeIds = session.participants.map((p) => p.id);
+  const beforePrefs = session.participants.map((p) => [...(p.preferences || [])]);
+
+  // handleRematch 相当
+  session.result = null;
+  session.status =
+    session.participants.length > 0 && session.participants.every((p) => p.submitted)
+      ? "ready"
+      : "waiting";
+
+  assert(session.result === null, "result が null");
+  assert(session.status === "ready", "status が ready");
+  assert(session.joinPassword === "1234", "パスワード保持");
+  assert(
+    session.participants.every((p, i) => p.id === beforeIds[i]),
+    "参加者ID保持",
+  );
+  assert(
+    session.participants.every(
+      (p, i) => JSON.stringify(p.preferences) === JSON.stringify(beforePrefs[i]),
+    ),
+    "希望データ保持",
+  );
+
+  // handleMatch 相当（複数回）
+  const runs = [];
+  for (let i = 0; i < 5; i++) {
+    const { groups, satisfaction } = runMatching(session.participants, session.groupConfig);
+    session.status = "matched";
+    session.result = { groups, satisfaction };
+    runs.push(groups.map((g) => g.members.sort().join(",")).sort().join("|"));
+  }
+  assert(session.status === "matched", "再実行後 status が matched");
+  assert(session.result?.groups?.length === 2, "2グループ生成");
+  assert(
+    runs.every((r) => r === "a,b|c,d"),
+    "希望ペアが同グループに維持される",
+  );
+}
+
+// 7. 10人・定員に余裕・希望なし → 全員が結果に含まれる
+{
+  const config = [{ size: 2, count: 4 }, { size: 3, count: 1 }];
+  const participants = makeParticipants(10);
+  const { groups } = runMatching(participants, config);
+  console.log("7. 10人・空き部屋あり・希望なし");
+  const assigned = new Set();
+  groups.forEach((g) => g.members.forEach((id) => assigned.add(id)));
+  console.log(`   配置: ${groups.map((g) => g.members.length).join(", ")}人 (${groups.length}グループ)`);
+  assert(assigned.size === 10, `10人全員がグループに入る: ${assigned.size}/10`);
+  validate(participants, config, { groups });
+}
+
 console.log(`\n${"─".repeat(40)}`);
 console.log(`結果: ${passed} 成功, ${failed} 失敗`);
 process.exit(failed > 0 ? 1 : 0);
