@@ -31,6 +31,58 @@ async function deleteSession(sessionId) {
   await remove(ref(db, `sessions/${sessionId}`));
 }
 
+const DEFAULT_ORGANIZER_PASSWORD = "1234";
+const DEFAULT_ADMIN_PASSWORD = "0000";
+const ORGANIZER_AUTH_KEY = "tripmatch_organizer_authenticated";
+const ADMIN_AUTH_KEY = "tripmatch_admin_authenticated";
+
+async function loadAppConfig() {
+  const snap = await get(ref(db, "config"));
+  if (!snap.exists()) {
+    return {
+      organizerPassword: DEFAULT_ORGANIZER_PASSWORD,
+      adminPassword: DEFAULT_ADMIN_PASSWORD,
+    };
+  }
+  const data = snap.val();
+  return {
+    organizerPassword: data.organizerPassword || DEFAULT_ORGANIZER_PASSWORD,
+    adminPassword: data.adminPassword || DEFAULT_ADMIN_PASSWORD,
+  };
+}
+
+async function saveAppConfig({ organizerPassword, adminPassword }) {
+  await set(ref(db, "config"), { organizerPassword, adminPassword });
+}
+
+function isOrganizerAuthenticated() {
+  return sessionStorage.getItem(ORGANIZER_AUTH_KEY) === "1";
+}
+
+function isAdminAuthenticated() {
+  return sessionStorage.getItem(ADMIN_AUTH_KEY) === "1";
+}
+
+function setOrganizerAuthenticated() {
+  sessionStorage.setItem(ORGANIZER_AUTH_KEY, "1");
+}
+
+function setAdminAuthenticated() {
+  sessionStorage.setItem(ADMIN_AUTH_KEY, "1");
+}
+
+function clearOrganizerAuth() {
+  sessionStorage.removeItem(ORGANIZER_AUTH_KEY);
+}
+
+function clearAdminAuth() {
+  sessionStorage.removeItem(ADMIN_AUTH_KEY);
+}
+
+function isValidAppPassword(pw) {
+  return /^\d{4,6}$/.test(pw);
+}
+
 const unlockKey = (sessionId) => `tripmatch_unlock_${sessionId}`;
 const participantKey = (sessionId) => `tripmatch_participant_${sessionId}`;
 
@@ -256,6 +308,171 @@ function GroupConfigEditor({ groupConfig, setGroupConfig, onChange }) {
         )}
       </div>
     </>
+  );
+}
+
+// ─── Login & Admin ───────────────────────────────────────────────────────────
+function LoginHome({ onOrganizer, onAdmin }) {
+  return (
+    <div style={{ padding: "48px 0 24px" }}>
+      <div style={{ textAlign: "center", marginBottom: 40 }}>
+        <div style={{ fontSize: 11, letterSpacing: 3, color: C.accent, marginBottom: 10 }}>TRIPMATCH</div>
+        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900, lineHeight: 1.3 }}>ログイン</h1>
+        <p style={{ color: C.muted, fontSize: 14, marginTop: 12, lineHeight: 1.6 }}>
+          幹事・管理者の方は暗証番号でログインしてください
+        </p>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <button
+          onClick={onOrganizer}
+          style={{ ...s.btn("primary"), width: "100%", padding: 18, fontSize: 16 }}
+        >
+          幹事
+        </button>
+        <button
+          onClick={onAdmin}
+          style={{ ...s.btn("teal"), width: "100%", padding: 18, fontSize: 16 }}
+        >
+          管理者
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PasswordGate({ title, subtitle, onSubmit, onBack, loading, error, variant = "primary" }) {
+  const [password, setPassword] = useState("");
+
+  const submit = () => {
+    const pin = digitsOnly(password, 6);
+    if (!isValidAppPassword(pin)) return;
+    onSubmit(pin);
+  };
+
+  return (
+    <div style={{ padding: "40px 0 24px" }}>
+      <div style={{ marginBottom: 32 }}>
+        <div style={{ fontSize: 11, letterSpacing: 3, color: C.accent, marginBottom: 8 }}>LOGIN</div>
+        <h2 style={{ margin: 0, fontSize: 24, fontWeight: 900 }}>{title}</h2>
+        {subtitle && <p style={{ color: C.muted, fontSize: 14, marginTop: 8 }}>{subtitle}</p>}
+      </div>
+      <div style={{ ...s.card, marginBottom: 16 }}>
+        <label style={s.label}>暗証番号（4〜6桁）</label>
+        <input
+          style={{ ...s.input, fontSize: 20, letterSpacing: 6, textAlign: "center" }}
+          type="text"
+          inputMode="numeric"
+          autoComplete="off"
+          maxLength={6}
+          placeholder="····"
+          value={password}
+          onChange={(e) => setPassword(digitsOnly(e.target.value, 6))}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+        />
+        {error && <div style={{ color: C.red, fontSize: 13, marginTop: 10 }}>{error}</div>}
+      </div>
+      <button
+        onClick={submit}
+        disabled={loading || !isValidAppPassword(password)}
+        style={{ ...s.btn(variant), width: "100%", padding: 16, fontSize: 15, marginBottom: 12 }}
+      >
+        {loading ? "確認中..." : "ログイン →"}
+      </button>
+      <button onClick={onBack} style={{ ...s.btn("ghost"), width: "100%" }}>戻る</button>
+    </div>
+  );
+}
+
+function AdminPanel({ onLogout }) {
+  const [organizerPassword, setOrganizerPassword] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const cfg = await loadAppConfig();
+      if (cancelled) return;
+      setOrganizerPassword(cfg.organizerPassword);
+      setAdminPassword(cfg.adminPassword);
+      setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleSave = async () => {
+    setErr("");
+    setMsg("");
+    const orgPw = digitsOnly(organizerPassword, 6);
+    const admPw = digitsOnly(adminPassword, 6);
+    if (!isValidAppPassword(orgPw) || !isValidAppPassword(admPw)) {
+      setErr("パスワードは4〜6桁の数字で入力してください");
+      return;
+    }
+    setSaving(true);
+    try {
+      await saveAppConfig({ organizerPassword: orgPw, adminPassword: admPw });
+      setOrganizerPassword(orgPw);
+      setAdminPassword(admPw);
+      setMsg("パスワードを保存しました");
+    } catch {
+      setErr("保存に失敗しました。再度お試しください");
+    }
+    setSaving(false);
+  };
+
+  if (loading) {
+    return (
+      <div style={{ textAlign: "center", padding: 60, color: C.muted }}>
+        <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
+        <div>設定を読み込んでいます...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ marginBottom: 28 }}>
+        <div style={{ fontSize: 11, letterSpacing: 3, color: C.teal, marginBottom: 8 }}>ADMIN</div>
+        <h2 style={{ margin: 0, fontSize: 24, fontWeight: 900 }}>管理者設定</h2>
+        <p style={{ color: C.muted, fontSize: 14, marginTop: 8 }}>幹事・管理者のログイン用パスワードを変更できます</p>
+      </div>
+      <div style={{ ...s.card, marginBottom: 16 }}>
+        <label style={s.label}>幹事用パスワード</label>
+        <input
+          style={{ ...s.input, marginBottom: 16 }}
+          type="text"
+          inputMode="numeric"
+          autoComplete="off"
+          maxLength={6}
+          value={organizerPassword}
+          onChange={(e) => { setOrganizerPassword(digitsOnly(e.target.value, 6)); setErr(""); setMsg(""); }}
+        />
+        <label style={s.label}>管理者用パスワード</label>
+        <input
+          style={s.input}
+          type="text"
+          inputMode="numeric"
+          autoComplete="off"
+          maxLength={6}
+          value={adminPassword}
+          onChange={(e) => { setAdminPassword(digitsOnly(e.target.value, 6)); setErr(""); setMsg(""); }}
+        />
+        {err && <div style={{ color: C.red, fontSize: 13, marginTop: 10 }}>{err}</div>}
+        {msg && <div style={{ color: C.teal, fontSize: 13, marginTop: 10 }}>{msg}</div>}
+      </div>
+      <button
+        onClick={handleSave}
+        disabled={saving}
+        style={{ ...s.btn("primary"), width: "100%", padding: 16, fontSize: 15, marginBottom: 12 }}
+      >
+        {saving ? "保存中..." : "変更を保存"}
+      </button>
+      <button onClick={onLogout} style={{ ...s.btn("ghost"), width: "100%" }}>ログアウト</button>
+    </div>
   );
 }
 
@@ -957,16 +1174,27 @@ function generateSessionId() {
 export default function App() {
   const params    = new URLSearchParams(window.location.search);
   const joinParam = params.get("join");
-  const savedOrganizer = !joinParam ? loadOrganizerState() : null;
+  const organizerAuthed = isOrganizerAuthenticated();
+  const adminAuthed = isAdminAuthenticated();
+  const savedOrganizer = !joinParam && organizerAuthed ? loadOrganizerState() : null;
 
-  const [mode,    setMode]    = useState(joinParam ? "participant" : "organizer");
+  const [appFlow, setAppFlow] = useState(() => {
+    if (joinParam) return "participant";
+    if (adminAuthed) return "admin";
+    if (organizerAuthed) return "organizer";
+    return "home";
+  });
+  const [homeStep, setHomeStep] = useState("menu");
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginErr, setLoginErr] = useState("");
+
   const [orgStep, setOrgStep] = useState(
     savedOrganizer?.sessionId ? savedOrganizer.orgStep : "setup",
   );
   const [sessionId, setSessionId] = useState(joinParam || savedOrganizer?.sessionId || null);
   const [session,   setSession]   = useState(null);
   const [orgRestoring, setOrgRestoring] = useState(
-    !joinParam && !!savedOrganizer?.sessionId,
+    !joinParam && organizerAuthed && !!savedOrganizer?.sessionId,
   );
   const pollRef = useRef(null);
 
@@ -1012,21 +1240,21 @@ export default function App() {
   }, [joinParam, orgRestoring, sessionId]);
 
   useEffect(() => {
-    if (mode !== "organizer") return;
+    if (appFlow !== "organizer") return;
     if (!sessionId || orgStep === "setup") {
       if (!sessionId) clearOrganizerState();
       return;
     }
     saveOrganizerState({ sessionId, orgStep });
-  }, [mode, sessionId, orgStep]);
+  }, [appFlow, sessionId, orgStep]);
 
   useEffect(() => {
-    if (sessionId && mode === "organizer" && !orgRestoring) {
+    if (sessionId && appFlow === "organizer" && !orgRestoring) {
       refreshSession();
       pollRef.current = setInterval(refreshSession, 4000);
       return () => clearInterval(pollRef.current);
     }
-  }, [sessionId, mode, refreshSession, orgRestoring]);
+  }, [sessionId, appFlow, refreshSession, orgRestoring]);
 
   const handleStart = async (eventName, groupConfig, joinPassword) => {
     const id = generateSessionId();
@@ -1094,6 +1322,76 @@ export default function App() {
     setOrgRestoring(false);
   };
 
+  const enterOrganizerFlow = (saved) => {
+    if (saved?.sessionId) {
+      setSessionId(saved.sessionId);
+      setOrgStep(saved.orgStep);
+      setOrgRestoring(true);
+    } else {
+      setSessionId(null);
+      setOrgStep("setup");
+      setOrgRestoring(false);
+    }
+    setAppFlow("organizer");
+  };
+
+  const handleOrganizerLogin = async (pin) => {
+    setLoginLoading(true);
+    setLoginErr("");
+    try {
+      const cfg = await loadAppConfig();
+      if (pin !== cfg.organizerPassword) {
+        setLoginErr("暗証番号が正しくありません");
+        return;
+      }
+      setOrganizerAuthenticated();
+      clearAdminAuth();
+      setHomeStep("menu");
+      enterOrganizerFlow(loadOrganizerState());
+    } catch {
+      setLoginErr("接続に失敗しました。再度お試しください");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleAdminLogin = async (pin) => {
+    setLoginLoading(true);
+    setLoginErr("");
+    try {
+      const cfg = await loadAppConfig();
+      if (pin !== cfg.adminPassword) {
+        setLoginErr("暗証番号が正しくありません");
+        return;
+      }
+      setAdminAuthenticated();
+      clearOrganizerAuth();
+      clearOrganizerState();
+      setSessionId(null);
+      setSession(null);
+      setOrgStep("setup");
+      setOrgRestoring(false);
+      setHomeStep("menu");
+      setAppFlow("admin");
+    } catch {
+      setLoginErr("接続に失敗しました。再度お試しください");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleAdminLogout = () => {
+    clearAdminAuth();
+    setAppFlow("home");
+    setHomeStep("menu");
+    setLoginErr("");
+  };
+
+  const handleHomeBack = () => {
+    setHomeStep("menu");
+    setLoginErr("");
+  };
+
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic', sans-serif" }}>
       {/* Top bar */}
@@ -1105,20 +1403,12 @@ export default function App() {
             <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1 }}>GROUP MATCHING SYSTEM</div>
           </div>
         </div>
-        {!joinParam && (
-          <div style={{ display: "flex", gap: 6 }}>
-            {[["organizer", "幹事"], ["participant", "参加者"]].map(([m, label]) => (
-              <button key={m} onClick={() => setMode(m)}
-                style={{ ...s.btn("ghost"), padding: "6px 12px", fontSize: 12, background: mode === m ? C.surface2 : "none", color: mode === m ? C.text : C.muted, border: `1px solid ${mode === m ? C.border : "transparent"}` }}>
-                {label}
-              </button>
-            ))}
-          </div>
-        )}
+        {!joinParam && appFlow === "admin" && <Tag color={C.teal}>管理者</Tag>}
+        {!joinParam && appFlow === "organizer" && <Tag color={C.accent}>幹事</Tag>}
         {joinParam && <Tag color={C.teal}>参加者モード</Tag>}
       </div>
 
-      {sessionId && mode === "organizer" && (
+      {sessionId && appFlow === "organizer" && (
         <div style={{ background: C.surface2, borderBottom: `1px solid ${C.border}`, padding: "8px 20px", display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 11, color: C.muted }}>セッションID</span>
           <span style={{ fontFamily: "monospace", fontWeight: 700, color: C.accentLight, fontSize: 13, letterSpacing: 2 }}>{sessionId}</span>
@@ -1127,27 +1417,49 @@ export default function App() {
       )}
 
       <div style={{ maxWidth: 680, margin: "0 auto", padding: "24px 16px" }}>
-        {mode === "organizer" && orgRestoring && (
+        {appFlow === "home" && homeStep === "menu" && (
+          <LoginHome
+            onOrganizer={() => { setHomeStep("organizer_pw"); setLoginErr(""); }}
+            onAdmin={() => { setHomeStep("admin_pw"); setLoginErr(""); }}
+          />
+        )}
+        {appFlow === "home" && homeStep === "organizer_pw" && (
+          <PasswordGate
+            title="幹事ログイン"
+            subtitle="幹事用の暗証番号を入力してください"
+            onSubmit={handleOrganizerLogin}
+            onBack={handleHomeBack}
+            loading={loginLoading}
+            error={loginErr}
+            variant="primary"
+          />
+        )}
+        {appFlow === "home" && homeStep === "admin_pw" && (
+          <PasswordGate
+            title="管理者ログイン"
+            subtitle="管理者用の暗証番号を入力してください"
+            onSubmit={handleAdminLogin}
+            onBack={handleHomeBack}
+            loading={loginLoading}
+            error={loginErr}
+            variant="teal"
+          />
+        )}
+        {appFlow === "admin" && <AdminPanel onLogout={handleAdminLogout} />}
+        {appFlow === "organizer" && orgRestoring && (
           <div style={{ textAlign: "center", padding: 60, color: C.muted }}>
             <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
             <div>幹事セッションを復元しています...</div>
           </div>
         )}
-        {mode === "organizer" && !orgRestoring && (
+        {appFlow === "organizer" && !orgRestoring && (
           <>
             {orgStep === "setup"     && <OrgSetup onStart={handleStart} />}
             {orgStep === "dashboard" && session && <OrgDashboard session={session} sessionId={sessionId} onRefresh={refreshSession} onMatch={handleMatch} onReset={handleReset} onSaveSettings={handleSaveSettings} />}
             {orgStep === "result"    && session?.result && <OrgResult session={session} onReset={handleReset} onRematch={handleRematch} />}
           </>
         )}
-        {mode === "participant" && sessionId  && <ParticipantView sessionId={sessionId} />}
-        {mode === "participant" && !sessionId && (
-          <div style={{ textAlign: "center", padding: "60px 0", color: C.muted }}>
-            <div style={{ fontSize: 48, marginBottom: 16 }}>🔗</div>
-            <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>参加URLが必要です</div>
-            <div style={{ fontSize: 13 }}>幹事から共有されたURLにアクセスしてください</div>
-          </div>
-        )}
+        {appFlow === "participant" && sessionId  && <ParticipantView sessionId={sessionId} />}
       </div>
     </div>
   );
