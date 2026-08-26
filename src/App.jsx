@@ -7,6 +7,12 @@ import {
   totalGroupSlots,
   effectiveGroupSize,
   effectiveGroupCount,
+  expandGroupSlots,
+  setSlotFixedMembers,
+  validateFixedMembers,
+  computeSatisfaction,
+  normalizeResultGroups,
+  getUnassignedParticipantIds,
 } from "./matching";
 
 // ─── Firebase helpers ──────────────────────────────────────────────────────────
@@ -86,16 +92,31 @@ function isValidAppPassword(pw) {
 const unlockKey = (sessionId) => `tripmatch_unlock_${sessionId}`;
 const participantKey = (sessionId) => `tripmatch_participant_${sessionId}`;
 
-function saveParticipantIdentity(sessionId, { myId, myName }) {
-  sessionStorage.setItem(
-    participantKey(sessionId),
-    JSON.stringify({ sessionId, myId, myName }),
+function isParticipantUnlocked(sessionId) {
+  return (
+    localStorage.getItem(unlockKey(sessionId)) === "1" ||
+    sessionStorage.getItem(unlockKey(sessionId)) === "1"
   );
+}
+
+function setParticipantUnlocked(sessionId) {
+  localStorage.setItem(unlockKey(sessionId), "1");
+  sessionStorage.setItem(unlockKey(sessionId), "1");
+}
+
+function saveParticipantIdentity(sessionId, { myId, myName }) {
+  const data = JSON.stringify({ sessionId, myId, myName });
+  localStorage.setItem(participantKey(sessionId), data);
+  sessionStorage.setItem(participantKey(sessionId), data);
 }
 
 function loadParticipantIdentity(sessionId) {
   try {
-    const raw = sessionStorage.getItem(participantKey(sessionId));
+    let raw = localStorage.getItem(participantKey(sessionId));
+    if (!raw) {
+      raw = sessionStorage.getItem(participantKey(sessionId));
+      if (raw) localStorage.setItem(participantKey(sessionId), raw);
+    }
     if (!raw) return null;
     const data = JSON.parse(raw);
     if (data.sessionId !== sessionId || !data.myId || !data.myName) return null;
@@ -106,7 +127,14 @@ function loadParticipantIdentity(sessionId) {
 }
 
 function clearParticipantIdentity(sessionId) {
+  localStorage.removeItem(participantKey(sessionId));
   sessionStorage.removeItem(participantKey(sessionId));
+}
+
+function clearParticipantSession(sessionId) {
+  localStorage.removeItem(unlockKey(sessionId));
+  sessionStorage.removeItem(unlockKey(sessionId));
+  clearParticipantIdentity(sessionId);
 }
 
 const ORGANIZER_SESSION_KEY = "tripmatch_organizer_sessionId";
@@ -163,6 +191,14 @@ function configNumDisplay(n) {
   return typeof n === "number" && !Number.isNaN(n) ? String(n) : "";
 }
 
+function isResultPublished(status) {
+  return status === "matched_published" || status === "matched";
+}
+
+function isMatchingResult(status) {
+  return status === "matched_pending" || status === "matched_published" || status === "matched";
+}
+
 // ─── Design tokens ────────────────────────────────────────────────────────────
 const C = {
   bg: "#0a0a0f",
@@ -211,9 +247,11 @@ function Tag({ children, color }) {
 
 function StatusBadge({ status }) {
   const map = {
-    waiting: { label: "参加者募集中", color: C.teal },
-    ready:   { label: "希望収集中",   color: "#f7c16a" },
-    matched: { label: "マッチング完了", color: C.accent },
+    waiting:           { label: "参加者募集中",       color: C.teal },
+    ready:             { label: "希望収集中",         color: "#f7c16a" },
+    matched_pending:   { label: "結果確認中（未公開）", color: "#f7c16a" },
+    matched_published: { label: "結果公開済み",       color: C.accent },
+    matched:           { label: "マッチング完了",     color: C.accent },
   };
   const { label, color } = map[status] || map.waiting;
   return <Tag color={color}>{label}</Tag>;
@@ -306,6 +344,201 @@ function GroupConfigEditor({ groupConfig, setGroupConfig, onChange }) {
             {previewNames.map((name, i) => <Tag key={i} color={GROUP_COLORS[i % GROUP_COLORS.length]}>{name}</Tag>)}
           </div>
         )}
+      </div>
+    </>
+  );
+}
+
+function FixedMembersEditor({ groupConfig, setGroupConfig, participants, onChange }) {
+  const [activeSlot, setActiveSlot] = useState(null);
+  const slots = expandGroupSlots(groupConfig);
+
+  const editingSlot = activeSlot
+    ? slots.find((s) => s.configId === activeSlot.configId && s.slotIndex === activeSlot.slotIndex)
+    : null;
+
+  useEffect(() => {
+    if (activeSlot && !editingSlot) setActiveSlot(null);
+  }, [activeSlot, editingSlot]);
+
+  const update = (next) => {
+    setGroupConfig(next);
+    onChange?.();
+  };
+
+  const getName = (id) => (participants || []).find((p) => p.id === id)?.name || id;
+
+  const fixedSlotByMember = () => {
+    const map = new Map();
+    slots.forEach((slot) => {
+      slot.fixedMembers.forEach((id) => map.set(id, slot.name));
+    });
+    return map;
+  };
+
+  const removeFixed = (configId, slotIndex, participantId) => {
+    const slot = slots.find((s) => s.configId === configId && s.slotIndex === slotIndex);
+    if (!slot) return;
+    update(setSlotFixedMembers(
+      groupConfig,
+      configId,
+      slotIndex,
+      slot.fixedMembers.filter((id) => id !== participantId),
+    ));
+  };
+
+  const toggleFixed = (configId, slotIndex, participantId, slotSize) => {
+    const slot = slots.find((s) => s.configId === configId && s.slotIndex === slotIndex);
+    if (!slot) return;
+    if (slot.fixedMembers.includes(participantId)) {
+      removeFixed(configId, slotIndex, participantId);
+      return;
+    }
+    if (slot.fixedMembers.length >= slotSize) return;
+    if (fixedSlotByMember().has(participantId)) return;
+    update(setSlotFixedMembers(groupConfig, configId, slotIndex, [...slot.fixedMembers, participantId]));
+  };
+
+  if (slots.length === 0) return null;
+
+  if (activeSlot && editingSlot) {
+    const slot = editingSlot;
+    const color = GROUP_COLORS[activeSlot.colorIndex % GROUP_COLORS.length];
+    const taken = fixedSlotByMember();
+    const atCapacity = slot.fixedMembers.length >= slot.size;
+
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={() => setActiveSlot(null)}
+          style={{ ...s.btn("ghost"), padding: "6px 12px", fontSize: 13, marginBottom: 16 }}
+        >
+          ← スロット一覧に戻る
+        </button>
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, letterSpacing: 2, color: C.muted, marginBottom: 4 }}>固定メンバー選択</div>
+          <div style={{ fontWeight: 800, fontSize: 18, color }}>{slot.name}</div>
+          <div style={{ fontSize: 13, color: C.muted, marginTop: 4 }}>
+            {slot.fixedMembers.length} / {slot.size} 人 選択中
+            {atCapacity && <span style={{ color: "#f7c16a", marginLeft: 8 }}>定員に達しました</span>}
+          </div>
+        </div>
+        {(participants || []).length === 0 ? (
+          <div style={{ color: C.muted, fontSize: 14, textAlign: "center", padding: "24px 0" }}>
+            参加者がいません
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {(participants || []).map((p) => {
+              const inThisSlot = slot.fixedMembers.includes(p.id);
+              const otherSlot = taken.get(p.id);
+              const takenElsewhere = otherSlot && !inThisSlot;
+              const disabled = takenElsewhere || (atCapacity && !inThisSlot);
+
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => toggleFixed(slot.configId, slot.slotIndex, p.id, slot.size)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    background: inThisSlot ? color + "20" : C.surface2,
+                    border: `1px solid ${inThisSlot ? color + "60" : C.border}`,
+                    borderRadius: 10,
+                    padding: "12px 14px",
+                    cursor: disabled ? "not-allowed" : "pointer",
+                    fontFamily: "inherit",
+                    textAlign: "left",
+                    opacity: disabled ? 0.55 : 1,
+                    width: "100%",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{
+                      width: 34, height: 34, borderRadius: "50%",
+                      background: inThisSlot ? color : C.border,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: 13, fontWeight: 700,
+                      color: inThisSlot ? "#000" : C.muted,
+                    }}>{(p.name || "?").charAt(0)}</div>
+                    <span style={{ fontWeight: 600, fontSize: 14, color: C.text }}>{p.name}</span>
+                  </div>
+                  {inThisSlot && <Tag color={color}>このスロットに固定</Tag>}
+                  {takenElsewhere && (
+                    <Tag color={C.muted}>選択済み（{otherSlot}）</Tag>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>
+        スロットをタップして固定メンバーを選びます。設定後「構成を保存」してください。
+      </div>
+      {(participants || []).length === 0 && (
+        <div style={{ color: C.muted, fontSize: 13, marginBottom: 12 }}>参加者がいると固定メンバーを選べます</div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {slots.map((slot, i) => {
+          const color = GROUP_COLORS[i % GROUP_COLORS.length];
+          return (
+            <button
+              key={`${slot.configId}-${slot.slotIndex}`}
+              type="button"
+              onClick={() => setActiveSlot({
+                configId: slot.configId,
+                slotIndex: slot.slotIndex,
+                colorIndex: i,
+              })}
+              style={{
+                background: C.surface2,
+                border: `1px solid ${slot.fixedMembers.length > slot.size ? C.red + "60" : color + "30"}`,
+                borderRadius: 10,
+                padding: "12px 14px",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                textAlign: "left",
+                width: "100%",
+              }}
+            >
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: slot.fixedMembers.length ? 8 : 0,
+              }}>
+                <span style={{ fontWeight: 700, fontSize: 14, color }}>{slot.name}</span>
+                <span style={{ fontSize: 12, color: C.muted }}>
+                  固定 {slot.fixedMembers.length} / {slot.size} 人 →
+                </span>
+              </div>
+              {slot.fixedMembers.length > 0 ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {slot.fixedMembers.map((id) => (
+                    <Tag key={id} color={color}>{getName(id)}</Tag>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: C.muted }}>タップしてメンバーを選択</div>
+              )}
+              {slot.fixedMembers.length > slot.size && (
+                <div style={{ color: C.red, fontSize: 12, marginTop: 6 }}>
+                  定員（{slot.size}人）を超えています
+                </div>
+              )}
+            </button>
+          );
+        })}
       </div>
     </>
   );
@@ -538,7 +771,9 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveS
   const [eventName, setEventName] = useState(session.eventName);
   const [groupConfig, setGroupConfig] = useState(session.groupConfig);
   const [settingsErr, setSettingsErr] = useState("");
+  const [matchErr, setMatchErr] = useState("");
   const [saving, setSaving] = useState(false);
+  const [matching, setMatching] = useState(false);
   const dirtyRef = useRef(false);
   const origin = window.location.origin + window.location.pathname;
   const participantUrl = `${origin}?join=${sessionId}`;
@@ -565,6 +800,11 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveS
     const slots = totalGroupSlots(groupConfig);
     if (slots < participantCount) {
       setSettingsErr(`合計定員（${slots}人）は参加者数（${participantCount}人）以上にしてください`);
+      return;
+    }
+    const fixedErr = validateFixedMembers(groupConfig, session.participants);
+    if (fixedErr) {
+      setSettingsErr(fixedErr);
       return;
     }
     setSaving(true); setSettingsErr("");
@@ -682,33 +922,196 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveS
         </button>
       </div>
 
+      <div style={{ ...s.card, marginBottom: 16 }}>
+        <label style={s.label}>固定メンバー設定</label>
+        <FixedMembersEditor
+          groupConfig={groupConfig}
+          setGroupConfig={setGroupConfig}
+          participants={session.participants}
+          onChange={() => { markDirty(); setSettingsErr(""); setMatchErr(""); }}
+        />
+      </div>
+
       <div style={{ display: "flex", gap: 10 }}>
         <button
-          onClick={onMatch}
-          disabled={(session.participants || []).length < 2}
+          onClick={async () => {
+            setMatchErr("");
+            const fixedErr = validateFixedMembers(groupConfig, session.participants);
+            if (fixedErr) {
+              setMatchErr(fixedErr);
+              return;
+            }
+            setMatching(true);
+            const err = await onMatch();
+            if (err) setMatchErr(err);
+            setMatching(false);
+          }}
+          disabled={(session.participants || []).length < 2 || matching}
           style={{
             ...s.btn("teal"), width: "100%", padding: 14, fontSize: 15,
-            opacity: (session.participants || []).length < 2 ? 0.5 : 1,
+            opacity: (session.participants || []).length < 2 || matching ? 0.5 : 1,
           }}
         >
-          🎲 マッチング実行 ({submitted.length}/{(session.participants || []).length}人)
+          {matching ? "マッチング中..." : `🎲 マッチング実行 (${submitted.length}/${(session.participants || []).length}人)`}
         </button>
       </div>
+      {matchErr && <div style={{ color: C.red, fontSize: 13, marginTop: 10 }}>{matchErr}</div>}
     </div>
   );
 }
 
 // ─── Organizer: Result ─────────────────────────────────────────────────────────
-function OrgResult({ session, onReset, onRematch }) {
-  const { groups, satisfaction } = session.result;
+function OrgResult({ session, onReset, onRematch, onPublish, onUpdateResult }) {
+  const [groups, setGroups] = useState(() =>
+    normalizeResultGroups(session.groupConfig, session.result.groups),
+  );
+  const [satisfaction, setSatisfaction] = useState(session.result.satisfaction);
+  const [movingId, setMovingId] = useState(null);
+  const [assigningId, setAssigningId] = useState(null);
+  const [publishing, setPublishing] = useState(false);
+
+  const published = isResultPublished(session.status);
+  const pending = session.status === "matched_pending";
+
+  useEffect(() => {
+    setGroups(normalizeResultGroups(session.groupConfig, session.result.groups));
+    setSatisfaction(session.result.satisfaction);
+  }, [session.result, session.groupConfig]);
+
   const getName = (id) => (session.participants || []).find((p) => p.id === id)?.name || id;
   const getSat  = (id) => satisfaction.find((s) => s.id === id);
   const totalScore = satisfaction.reduce((a, s) => a + s.score, 0);
   const maxScore   = (session.participants || []).length * ((session.participants || []).length - 1) * 2;
   const pct = maxScore > 0 ? Math.round((totalScore / maxScore) * 100) : 0;
 
+  const overCapacityGroups = groups.filter((g) => g.members.length > (g.slotSize ?? 99));
+  const unassignedIds = getUnassignedParticipantIds(session.participants, groups);
+
+  const persistGroups = async (nextGroups) => {
+    const normalized = normalizeResultGroups(session.groupConfig, nextGroups);
+    setGroups(normalized);
+    const sat = computeSatisfaction(session.participants, normalized);
+    setSatisfaction(sat);
+    await onUpdateResult({ groups: normalized, satisfaction: sat });
+  };
+
+  const moveMember = async (memberId, targetGroupName) => {
+    const next = groups.map((g) => ({
+      ...g,
+      members: g.members.filter((id) => id !== memberId),
+    }));
+    const target = next.find((g) => g.name === targetGroupName);
+    if (target) target.members.push(memberId);
+    setMovingId(null);
+    setAssigningId(null);
+    await persistGroups(next);
+  };
+
+  const assignMember = async (memberId, targetGroupName) => {
+    await moveMember(memberId, targetGroupName);
+  };
+
+  const handlePublish = async () => {
+    if (!window.confirm("公開すると参加者全員に結果が表示されます。よろしいですか？")) return;
+    setPublishing(true);
+    await onPublish();
+    setPublishing(false);
+  };
+
   return (
     <div>
+      {pending && (
+        <div style={{
+          background: "#f7c16a20",
+          border: `1px solid #f7c16a60`,
+          borderRadius: 10,
+          padding: "12px 16px",
+          marginBottom: 16,
+          fontSize: 14,
+          color: "#f7c16a",
+          fontWeight: 600,
+        }}>
+          現在この結果は参加者には見えていません
+        </div>
+      )}
+      {published && (
+        <div style={{
+          background: `${C.teal}20`,
+          border: `1px solid ${C.teal}60`,
+          borderRadius: 10,
+          padding: "12px 16px",
+          marginBottom: 16,
+          fontSize: 14,
+          color: C.teal,
+          fontWeight: 600,
+        }}>
+          公開済み — 参加者に結果が表示されています
+        </div>
+      )}
+
+      {overCapacityGroups.length > 0 && (
+        <div style={{
+          background: "#ff6b6b15",
+          border: `1px solid ${C.red}40`,
+          borderRadius: 10,
+          padding: "12px 16px",
+          marginBottom: 16,
+          fontSize: 13,
+          color: C.red,
+        }}>
+          定員超過: {overCapacityGroups.map((g) => `「${g.name}」(${g.members.length}/${g.slotSize}人)`).join("、")}
+        </div>
+      )}
+
+      {unassignedIds.length > 0 && (
+        <div style={{
+          background: "#ff6b6b15",
+          border: `1px solid ${C.red}40`,
+          borderRadius: 10,
+          padding: "12px 16px",
+          marginBottom: 16,
+          fontSize: 13,
+          color: C.red,
+        }}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>
+            グループ未配置 ({unassignedIds.length}人)
+          </div>
+          {unassignedIds.map((id) => (
+            <div key={id} style={{ marginBottom: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <span style={{ fontWeight: 600 }}>{getName(id)}</span>
+                <button
+                  type="button"
+                  onClick={() => setAssigningId(assigningId === id ? null : id)}
+                  style={{ ...s.btn("ghost"), padding: "2px 8px", fontSize: 11 }}
+                >
+                  グループに追加
+                </button>
+              </div>
+              {assigningId === id && (
+                <div style={{ marginTop: 6 }}>
+                  <select
+                    defaultValue=""
+                    onChange={(e) => {
+                      if (e.target.value) assignMember(id, e.target.value);
+                      e.target.value = "";
+                    }}
+                    style={{ ...s.input, fontSize: 12, padding: "6px 8px" }}
+                  >
+                    <option value="">追加先を選択...</option>
+                    {groups.map((tg) => (
+                      <option key={tg.name} value={tg.name}>
+                        {tg.name} ({tg.members.length}/{tg.slotSize}人)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       <div style={{ marginBottom: 24 }}>
         <div style={{ fontSize: 11, letterSpacing: 3, color: C.accent, marginBottom: 4 }}>RESULT</div>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 900 }}>{session.eventName}</h2>
@@ -733,17 +1136,55 @@ function OrgResult({ session, onReset, onRematch }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 14, marginBottom: 20 }}>
         {groups.map((g, i) => {
           const color = GROUP_COLORS[i % GROUP_COLORS.length];
+          const over = g.members.length > (g.slotSize ?? 99);
           return (
-            <div key={i} style={{ ...s.card, border: `1px solid ${color}50`, boxShadow: `0 0 24px ${color}10` }}>
-              <div style={{ fontWeight: 800, fontSize: 15, color, marginBottom: 12 }}>
+            <div key={g.name} style={{
+              ...s.card,
+              border: `1px solid ${over ? C.red + "80" : color + "50"}`,
+              boxShadow: `0 0 24px ${color}10`,
+            }}>
+              <div style={{ fontWeight: 800, fontSize: 15, color: over ? C.red : color, marginBottom: 12 }}>
                 {g.name}
-                <span style={{ color: C.muted, fontWeight: 400, fontSize: 12, marginLeft: 6 }}>{g.members.length}人</span>
+                <span style={{ color: C.muted, fontWeight: 400, fontSize: 12, marginLeft: 6 }}>
+                  {g.members.length}{g.slotSize != null ? `/${g.slotSize}` : ""}人
+                </span>
               </div>
+              {g.members.length === 0 && (
+                <div style={{ fontSize: 12, color: C.muted, fontStyle: "italic" }}>（空き）</div>
+              )}
               {g.members.map((id) => {
                 const sat = getSat(id);
                 return (
                   <div key={id} style={{ marginBottom: 10 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14 }}>{getName(id)}</div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{getName(id)}</div>
+                      <button
+                        type="button"
+                        onClick={() => setMovingId(movingId === id ? null : id)}
+                        style={{ ...s.btn("ghost"), padding: "2px 8px", fontSize: 11 }}
+                      >
+                        移動
+                      </button>
+                    </div>
+                    {movingId === id && (
+                      <div style={{ marginTop: 6 }}>
+                        <select
+                          defaultValue=""
+                          onChange={(e) => {
+                            if (e.target.value) moveMember(id, e.target.value);
+                            e.target.value = "";
+                          }}
+                          style={{ ...s.input, fontSize: 12, padding: "6px 8px" }}
+                        >
+                          <option value="">移動先を選択...</option>
+                          {groups.filter((tg) => tg.name !== g.name).map((tg) => (
+                            <option key={tg.name} value={tg.name}>
+                              {tg.name} ({tg.members.length}/{tg.slotSize}人)
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
                     {(sat?.matched || []).length > 0
                       ? <div style={{ fontSize: 11, color: C.teal, marginTop: 2 }}>✓ {sat.matched.map(getName).join(", ")}</div>
                       : <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>希望マッチなし</div>}
@@ -755,6 +1196,15 @@ function OrgResult({ session, onReset, onRematch }) {
         })}
       </div>
 
+      {pending && (
+        <button
+          onClick={handlePublish}
+          disabled={publishing}
+          style={{ ...s.btn("primary"), width: "100%", marginBottom: 12, padding: 16, fontSize: 15 }}
+        >
+          {publishing ? "公開中..." : "この結果を参加者に公開する"}
+        </button>
+      )}
       <button
         onClick={onRematch}
         style={{ ...s.btn("teal"), width: "100%", marginBottom: 12, padding: 14, fontSize: 15 }}
@@ -774,11 +1224,9 @@ function ParticipantView({ sessionId }) {
   const [myId,        setMyId]        = useState(savedIdentity?.myId ?? null);
   const [preferences, setPreferences] = useState([]);
   const [passwordInput, setPasswordInput] = useState("");
-  const hasUnlock = () =>
-    !!sessionStorage.getItem(unlockKey(sessionId)) || !!loadParticipantIdentity(sessionId)?.myId;
-  const [unlocked, setUnlocked] = useState(() => hasUnlock());
+  const [unlocked, setUnlocked] = useState(() => isParticipantUnlocked(sessionId));
   const [step, setStep] = useState(() => {
-    if (!hasUnlock()) return "password";
+    if (!isParticipantUnlocked(sessionId)) return "password";
     if (savedIdentity?.myId) return "restore";
     return "join";
   });
@@ -791,12 +1239,12 @@ function ParticipantView({ sessionId }) {
     setMyName(participant.name);
     setPreferences(participant.preferences || []);
     setSession(s);
-    sessionStorage.setItem(unlockKey(sessionId), "1");
+    setParticipantUnlocked(sessionId);
     saveParticipantIdentity(sessionId, {
       myId: participant.id,
       myName: participant.name,
     });
-    if (s.status === "matched") setStep("result");
+    if (isResultPublished(s.status)) setStep("result");
     else if (participant.submitted) setStep("done");
     else setStep("vote");
   }, [sessionId]);
@@ -806,7 +1254,7 @@ function ParticipantView({ sessionId }) {
     const s = await loadSession(sessionId);
     if (s) {
       setSession(s);
-      if (s.status === "matched") {
+      if (isResultPublished(s.status)) {
         setStep((prev) => (prev === "password" ? prev : "result"));
         return;
       }
@@ -820,7 +1268,12 @@ function ParticipantView({ sessionId }) {
           setStep("join");
           return;
         }
-        setStep(me.submitted ? "done" : "vote");
+        setStep((prev) => {
+          if (prev === "vote") return "vote";
+          if (prev === "result" && !isResultPublished(s.status)) return "done";
+          if (prev === "password") return prev;
+          return me.submitted ? "done" : "vote";
+        });
         setPreferences((prev) =>
           prev.filter((id) => (s.participants || []).some((p) => p.id === id)),
         );
@@ -832,8 +1285,7 @@ function ParticipantView({ sessionId }) {
       setMyId(null);
       setMyName("");
       setPreferences([]);
-      sessionStorage.removeItem(unlockKey(sessionId));
-      clearParticipantIdentity(sessionId);
+      clearParticipantSession(sessionId);
     }
   }, [sessionId, unlocked, myId]);
 
@@ -850,10 +1302,9 @@ function ParticipantView({ sessionId }) {
       const s = await loadSession(sessionId);
       if (cancelled) return;
       if (!s) {
-        clearParticipantIdentity(sessionId);
+        clearParticipantSession(sessionId);
         setStep("password");
         setUnlocked(false);
-        sessionStorage.removeItem(unlockKey(sessionId));
         return;
       }
       const me = (s.participants || []).find((p) => p.id === saved.myId);
@@ -895,7 +1346,7 @@ function ParticipantView({ sessionId }) {
       setLoading(false);
       return;
     }
-    sessionStorage.setItem(unlockKey(sessionId), "1");
+    setParticipantUnlocked(sessionId);
     setUnlocked(true);
     const saved = loadParticipantIdentity(sessionId);
     if (saved?.myId) {
@@ -908,7 +1359,7 @@ function ParticipantView({ sessionId }) {
       clearParticipantIdentity(sessionId);
     }
     setSession(s);
-    setStep(s.status === "matched" ? "result" : "join");
+    setStep(isResultPublished(s.status) ? "result" : "join");
     setLoading(false);
   };
 
@@ -1009,7 +1460,7 @@ function ParticipantView({ sessionId }) {
   );
 
   // ── Result ──
-  if (step === "result" && session.result) {
+  if (step === "result" && session.result && isResultPublished(session.status)) {
     const { groups } = session.result;
     const myGroup = groups.find((g) => g.members.includes(myId));
     const getName = (id) => (session.participants || []).find((p) => p.id === id)?.name || id;
@@ -1062,11 +1513,15 @@ function ParticipantView({ sessionId }) {
   }
 
   // ── Done ──
-  if (step === "done" && session.status !== "matched") return (
+  if (step === "done" && !isResultPublished(session.status)) return (
     <div style={{ textAlign: "center", padding: "32px 0" }}>
       <div style={{ fontSize: 56, marginBottom: 16 }}>✅</div>
       <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 8 }}>希望を提出しました！</div>
-      <div style={{ color: C.muted, fontSize: 14, marginBottom: 24 }}>幹事がマッチングを実行するまでお待ちください。</div>
+      <div style={{ color: C.muted, fontSize: 14, marginBottom: 24 }}>
+        {session.status === "matched_pending"
+          ? "幹事が結果を確認中です。公開されるまでお待ちください。"
+          : "幹事がマッチングを実行するまでお待ちください。"}
+      </div>
       <div style={{ ...s.card, textAlign: "left" }}>
         <label style={s.label}>あなたの希望順位</label>
         {preferences.length === 0
@@ -1082,7 +1537,11 @@ function ParticipantView({ sessionId }) {
             })}
       </div>
       <button
-        onClick={() => setStep("vote")}
+        onClick={() => {
+          const me = (session.participants || []).find((p) => p.id === myId);
+          setPreferences(me?.preferences || []);
+          setStep("vote");
+        }}
         style={{ ...s.btn("ghost"), width: "100%", marginTop: 20 }}
       >
         希望を編集する
@@ -1141,6 +1600,15 @@ function ParticipantView({ sessionId }) {
       <button onClick={submitPrefs} disabled={loading} style={{ ...s.btn("primary"), width: "100%", padding: 16, fontSize: 15 }}>
         {loading ? "送信中..." : isUpdate ? "希望を更新する →" : "希望を提出する →"}
       </button>
+      {isUpdate && (
+        <button
+          type="button"
+          onClick={() => setStep("done")}
+          style={{ ...s.btn("ghost"), width: "100%", marginTop: 10 }}
+        >
+          キャンセル
+        </button>
+      )}
     </div>
     );
   }
@@ -1203,7 +1671,7 @@ export default function App() {
     const s = await loadSession(sessionId);
     if (s) {
       setSession(s);
-      if (s.status === "matched") {
+      if (isMatchingResult(s.status)) {
         setOrgStep((prev) => {
           if (prev !== "result") saveOrganizerState({ sessionId, orgStep: "result" });
           return "result";
@@ -1229,7 +1697,7 @@ export default function App() {
       }
       setSession(s);
       let step = saved?.orgStep || "dashboard";
-      if (s.status === "matched") step = "result";
+      if (isMatchingResult(s.status)) step = "result";
       else if (step === "result") step = "dashboard";
       setOrgStep(step);
       saveOrganizerState({ sessionId, orgStep: step });
@@ -1285,23 +1753,41 @@ export default function App() {
 
   const handleMatch = async () => {
     const s = await loadSession(sessionId);
-    if (!s || (s.participants || []).length < 2) return;
-    const { groups, satisfaction } = runMatching(s.participants, s.groupConfig);
-    s.status = "matched";
-    s.result = { groups, satisfaction };
+    if (!s || (s.participants || []).length < 2) return "参加者が2人以上必要です";
+    try {
+      const { groups, satisfaction } = runMatching(s.participants, s.groupConfig);
+      s.status = "matched_pending";
+      s.result = { groups, satisfaction };
+      await saveSession(sessionId, s);
+      saveOrganizerState({ sessionId, orgStep: "result" });
+      setSession(s);
+      setOrgStep("result");
+      return null;
+    } catch (e) {
+      return e.message || "マッチングに失敗しました";
+    }
+  };
+
+  const handleUpdateResult = async (result) => {
+    const s = await loadSession(sessionId);
+    if (!s) return;
+    s.result = result;
     await saveSession(sessionId, s);
-    saveOrganizerState({ sessionId, orgStep: "result" });
     setSession(s);
-    setOrgStep("result");
+  };
+
+  const handlePublish = async () => {
+    const s = await loadSession(sessionId);
+    if (!s) return;
+    s.status = "matched_published";
+    await saveSession(sessionId, s);
+    setSession(s);
   };
 
   const handleRematch = async () => {
     const s = await loadSession(sessionId);
     if (!s) return;
-    const participants = s.participants || [];
-    const allSubmitted =
-      participants.length > 0 && participants.every((p) => p.submitted);
-    s.status = allSubmitted ? "ready" : "waiting";
+    s.status = "waiting";
     s.result = null;
     await saveSession(sessionId, s);
     saveOrganizerState({ sessionId, orgStep: "dashboard" });
@@ -1310,10 +1796,10 @@ export default function App() {
   };
 
   const handleReset = async () => {
+    if (!window.confirm("セッションを削除して最初からやり直します。参加者データもすべて消えます。よろしいですか？")) return;
     if (sessionId) {
       await deleteSession(sessionId);
-      sessionStorage.removeItem(unlockKey(sessionId));
-      clearParticipantIdentity(sessionId);
+      clearParticipantSession(sessionId);
     }
     clearOrganizerState();
     setSessionId(null);
@@ -1456,7 +1942,15 @@ export default function App() {
           <>
             {orgStep === "setup"     && <OrgSetup onStart={handleStart} />}
             {orgStep === "dashboard" && session && <OrgDashboard session={session} sessionId={sessionId} onRefresh={refreshSession} onMatch={handleMatch} onReset={handleReset} onSaveSettings={handleSaveSettings} />}
-            {orgStep === "result"    && session?.result && <OrgResult session={session} onReset={handleReset} onRematch={handleRematch} />}
+            {orgStep === "result"    && session?.result && (
+              <OrgResult
+                session={session}
+                onReset={handleReset}
+                onRematch={handleRematch}
+                onPublish={handlePublish}
+                onUpdateResult={handleUpdateResult}
+              />
+            )}
           </>
         )}
         {appFlow === "participant" && sessionId  && <ParticipantView sessionId={sessionId} />}

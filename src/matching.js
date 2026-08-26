@@ -14,6 +14,82 @@ export function normalizeGroupConfig(groupConfig) {
   }));
 }
 
+export function getSlotFixedMembers(c, slotIndex = 0) {
+  if (!c.fixedMembers || !Array.isArray(c.fixedMembers) || c.fixedMembers.length === 0) {
+    return [];
+  }
+  const count = effectiveGroupCount(c);
+  if (count === 1) {
+    if (typeof c.fixedMembers[0] === "string") return [...c.fixedMembers];
+    return Array.isArray(c.fixedMembers[0]) ? [...c.fixedMembers[0]] : [];
+  }
+  const entry = c.fixedMembers[slotIndex];
+  return Array.isArray(entry) ? [...entry] : [];
+}
+
+export function expandGroupSlots(groupConfig) {
+  const slots = [];
+  normalizeGroupConfig(groupConfig).forEach((c) => {
+    for (let i = 0; i < c.count; i++) {
+      const name = c.name
+        ? c.count === 1 ? c.name : `${c.name}${i + 1}`
+        : `グループ${slots.length + 1}`;
+      slots.push({
+        configId: c.id,
+        slotIndex: i,
+        name,
+        size: c.size,
+        fixedMembers: getSlotFixedMembers(c, i),
+      });
+    }
+  });
+  return slots;
+}
+
+export function setSlotFixedMembers(groupConfig, configId, slotIndex, memberIds) {
+  return groupConfig.map((c) => {
+    if (c.id !== configId) return c;
+    const count = effectiveGroupCount(c);
+    if (count === 1) {
+      return { ...c, fixedMembers: [...memberIds] };
+    }
+    let fixed = c.fixedMembers;
+    if (
+      !Array.isArray(fixed) ||
+      fixed.length !== count ||
+      typeof fixed[0] === "string"
+    ) {
+      fixed = Array.from({ length: count }, () => []);
+    } else {
+      fixed = fixed.map((arr) => [...arr]);
+    }
+    fixed[slotIndex] = [...memberIds];
+    return { ...c, fixedMembers: fixed };
+  });
+}
+
+export function validateFixedMembers(groupConfig, participants) {
+  const ids = new Set((participants || []).map((p) => p.id));
+  const seen = new Set();
+  const slots = expandGroupSlots(groupConfig);
+
+  for (const slot of slots) {
+    if (slot.fixedMembers.length > slot.size) {
+      return `「${slot.name}」の固定メンバー（${slot.fixedMembers.length}人）が定員（${slot.size}人）を超えています`;
+    }
+    for (const id of slot.fixedMembers) {
+      if (!ids.has(id)) {
+        return "固定メンバーに存在しない参加者が含まれています";
+      }
+      if (seen.has(id)) {
+        return "同じ参加者が複数グループに固定されています";
+      }
+      seen.add(id);
+    }
+  }
+  return null;
+}
+
 export function totalGroupSlots(groupConfig) {
   return groupConfig.reduce((a, c) => a + effectiveGroupSize(c) * effectiveGroupCount(c), 0);
 }
@@ -113,12 +189,13 @@ function buildClusters(ids, edges) {
 
 function buildSlots(groupConfig) {
   const slots = [];
-  groupConfig.forEach((c) => {
+  normalizeGroupConfig(groupConfig).forEach((c) => {
     for (let i = 0; i < c.count; i++) {
       const name = c.name
         ? c.count === 1 ? c.name : `${c.name}${i + 1}`
         : `グループ${slots.length + 1}`;
-      slots.push({ slotSize: c.size, name, members: [] });
+      const fixed = getSlotFixedMembers(c, i);
+      slots.push({ slotSize: c.size, name, members: [...fixed] });
     }
   });
   return slots;
@@ -176,13 +253,35 @@ function findSlotWithMostSpace(groups) {
   return bestFree > 0 ? best : -1;
 }
 
-function forceAssignAll(groups, ids) {
+/** 余った参加者は3人以上の部屋を優先（なければ2人部屋） */
+function findSlotForRemaining(groups) {
+  const candidates = [];
+  for (let i = 0; i < groups.length; i++) {
+    const free = slotFree(i, groups);
+    if (free > 0) candidates.push({ gi: i, free, size: groups[i].slotSize });
+  }
+  if (!candidates.length) return -1;
+  const large = candidates.filter((c) => c.size >= 3);
+  const pool = large.length ? large : candidates;
+  pool.sort((a, b) => b.size - a.size || b.free - a.free);
+  return pool[0].gi;
+}
+
+function slotFillOrder(groups) {
+  return groups
+    .map((g, gi) => ({ gi, free: g.slotSize - g.members.length, size: g.slotSize }))
+    .filter(({ free }) => free > 0)
+    .sort((a, b) => a.size - b.size || b.free - a.free)
+    .map(({ gi }) => gi);
+}
+
+function forceAssignAll(groups, ids, pickSlot = findSlotWithMostSpace) {
   const placed = new Set();
   groups.forEach((g) => g.members.forEach((id) => placed.add(id)));
 
   for (const id of ids) {
     if (placed.has(id)) continue;
-    const gi = findSlotWithMostSpace(groups);
+    const gi = pickSlot(groups);
     if (gi < 0) {
       const fallback = findSlotWithSpace(groups);
       if (fallback < 0) break;
@@ -275,6 +374,91 @@ function takeClusterForSlot(clusters, slotSize, poolSet) {
   return fits || null;
 }
 
+function repackSlotsWithFixed(groups, ids, affinity, clusters) {
+  let pool = shuffleArray([...ids]);
+  const poolSet = () => new Set(pool);
+  let clusterQueue = [...clusters].sort((a, b) => b.length - a.length);
+  const activeSet = new Set(chooseSlotIndicesForCount(groups, pool.length));
+  const fillOrder = slotFillOrder(groups).filter((gi) => activeSet.has(gi));
+
+  // Phase 1: クラスターと同じ定員のスロットへ（2人部屋から優先）
+  for (const gi of fillOrder) {
+    const need = groups[gi].slotSize - groups[gi].members.length;
+    if (need <= 0) continue;
+    const exactIdx = clusterQueue.findIndex(
+      (c) => c.length === need && c.every((id) => poolSet().has(id)),
+    );
+    if (exactIdx >= 0) {
+      const exact = clusterQueue.splice(exactIdx, 1)[0];
+      groups[gi].members.push(...exact);
+      pool = pool.filter((id) => !exact.includes(id));
+    }
+  }
+
+  // Phase 2: 残りを定員の小さいスロットから埋める（大クラスターは分割しない）
+  clusterQueue = clusterQueue.filter((c) => c.every((id) => poolSet().has(id)));
+  for (const gi of fillOrder) {
+    const need = groups[gi].slotSize - groups[gi].members.length;
+    if (need <= 0 || !pool.length) continue;
+    let picked = [];
+
+    const cluster = takeClusterForSlot(clusterQueue, need, poolSet());
+    if (cluster) {
+      const idx = clusterQueue.findIndex((c) => c === cluster);
+      if (idx >= 0) clusterQueue.splice(idx, 1);
+      let members = [...cluster];
+      while (members.length > need) {
+        pool.push(removeWeakestFromCluster(members, affinity));
+      }
+      picked = members;
+      pool = pool.filter((id) => !picked.includes(id));
+      while (picked.length < need && pool.length) {
+        const blocked = new Set(
+          clusterQueue.filter((c) => c.length > need).flat(),
+        );
+        const candidates = pool.filter((id) => !blocked.has(id));
+        const extra = bestUnassignedForSlot(
+          { members: [...groups[gi].members, ...picked] },
+          candidates.length ? candidates : pool,
+          affinity,
+        );
+        if (!extra) break;
+        picked.push(extra);
+        pool = pool.filter((id) => id !== extra);
+      }
+    } else {
+      const blocked = new Set(
+        clusterQueue.filter((c) => c.length > need).flat(),
+      );
+      const candidates = pool.filter((id) => !blocked.has(id));
+      const k = Math.min(need, (candidates.length ? candidates : pool).length);
+      if (k > 0) {
+        picked = pickBestSubset(candidates.length ? candidates : pool, k, affinity);
+      }
+    }
+
+    groups[gi].members.push(...picked.slice(0, need));
+    const pickedSet = new Set(picked);
+    pool = pool.filter((id) => !pickedSet.has(id));
+  }
+
+  // 2人部屋に1人だけ残った場合は大きい部屋へ移す
+  for (let gi = 0; gi < groups.length; gi++) {
+    if (groups[gi].slotSize === 2 && groups[gi].members.length === 1) {
+      const id = groups[gi].members.pop();
+      const target = findSlotForRemaining(groups);
+      if (target >= 0) groups[target].members.push(id);
+      else groups[gi].members.push(id);
+    }
+  }
+
+  for (let gi = 0; gi < groups.length; gi++) {
+    if (!activeSet.has(gi)) groups[gi].members = [];
+  }
+
+  return pool;
+}
+
 function repackSlotsExactly(groups, ids, affinity, clusters) {
   let pool = shuffleArray([...ids]);
   const poolSet = () => new Set(pool);
@@ -322,47 +506,28 @@ function repackSlotsExactly(groups, ids, affinity, clusters) {
   return pool;
 }
 
-export function runMatching(participants, groupConfig) {
-  groupConfig = normalizeGroupConfig(groupConfig);
-  const ids = participants.map((p) => p.id);
-  const n = ids.length;
+export function normalizeResultGroups(groupConfig, groups = []) {
+  const slots = buildSlots(normalizeGroupConfig(groupConfig));
+  const byName = new Map(groups.map((g) => [g.name, g]));
+  return slots.map((s) => {
+    const existing = byName.get(s.name);
+    return {
+      name: s.name,
+      slotSize: s.slotSize,
+      members: [...(existing?.members ?? [])],
+    };
+  });
+}
 
-  const affinity = buildAffinity(participants, ids);
-  const edges = buildEdges(ids, affinity);
-  const groups = buildSlots(groupConfig);
+export function getUnassignedParticipantIds(participants, groups) {
+  const assigned = new Set(groups.flatMap((g) => g.members));
+  return (participants || []).filter((p) => !assigned.has(p.id)).map((p) => p.id);
+}
 
-  // Step2: 希望グラフからクラスター（連結成分）を構築
-  const clusters = buildClusters(ids, edges).sort((a, b) => b.length - a.length);
-
-  // Step3〜5: クラスター優先でスロットに割当し、定員ぴったりに再パック
-  let remaining = repackSlotsExactly(groups, ids, affinity, clusters);
-
-  // Step4: 余った参加者を空きスロットへ（定員超過しない）
-  remaining = shuffleArray(remaining);
-  for (const id of remaining) {
-    const gi = findSlotWithMostSpace(groups);
-    if (gi < 0) break;
-    groups[gi].members.push(id);
-  }
-
-  forceAssignAll(groups, ids);
-
-  for (let gi = 0; gi < groups.length; gi++) {
-    if (groups[gi].members.length > groups[gi].slotSize) {
-      groups[gi].members = groups[gi].members.slice(0, groups[gi].slotSize);
-    }
-  }
-
-  const result = groups
-    .filter((g) => g.members.length > 0)
-    .map((g) => ({
-      members: [...g.members],
-      name: g.name,
-      slotSize: g.slotSize,
-    }));
-
-  const satisfaction = participants.map((p) => {
-    const grp = result.find((g) => g.members.includes(p.id));
+export function computeSatisfaction(participants, groups) {
+  const n = participants.length;
+  return participants.map((p) => {
+    const grp = groups.find((g) => g.members.includes(p.id));
     const matched = grp
       ? (p.preferences || []).filter((pref) => grp.members.includes(pref))
       : [];
@@ -372,6 +537,60 @@ export function runMatching(participants, groupConfig) {
     }, 0);
     return { id: p.id, score, matched };
   });
+}
 
-  return { groups: result, satisfaction };
+export function runMatching(participants, groupConfig) {
+  const fixedErr = validateFixedMembers(groupConfig, participants);
+  if (fixedErr) throw new Error(fixedErr);
+
+  groupConfig = normalizeGroupConfig(groupConfig);
+  const ids = participants.map((p) => p.id);
+
+  const affinity = buildAffinity(participants, ids);
+  const groups = buildSlots(groupConfig);
+
+  const fixedIds = new Set();
+  groups.forEach((g) => g.members.forEach((id) => fixedIds.add(id)));
+  const remainingIds = ids.filter((id) => !fixedIds.has(id));
+
+  const edges = buildEdges(remainingIds, affinity);
+  const clusters = buildClusters(remainingIds, edges).sort((a, b) => b.length - a.length);
+
+  let remaining = repackSlotsWithFixed(groups, remainingIds, affinity, clusters);
+
+  remaining = shuffleArray(remaining);
+  for (const id of remaining) {
+    const gi = findSlotForRemaining(groups);
+    if (gi < 0) break;
+    groups[gi].members.push(id);
+  }
+
+  forceAssignAll(groups, ids, findSlotForRemaining);
+
+  for (let gi = 0; gi < groups.length; gi++) {
+    if (groups[gi].members.length > groups[gi].slotSize) {
+      groups[gi].members = groups[gi].members.slice(0, groups[gi].slotSize);
+    }
+  }
+
+  // 未配置が残っていれば空きスロットへ
+  const placed = new Set(groups.flatMap((g) => g.members));
+  for (const id of ids) {
+    if (placed.has(id)) continue;
+    const gi = findSlotWithSpace(groups);
+    if (gi < 0) break;
+    groups[gi].members.push(id);
+    placed.add(id);
+  }
+
+  const allGroups = groups.map((g) => ({
+    members: [...g.members],
+    name: g.name,
+    slotSize: g.slotSize,
+  }));
+
+  return {
+    groups: normalizeResultGroups(groupConfig, allGroups),
+    satisfaction: computeSatisfaction(participants, allGroups),
+  };
 }
