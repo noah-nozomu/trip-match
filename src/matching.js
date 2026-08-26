@@ -68,6 +68,45 @@ export function setSlotFixedMembers(groupConfig, configId, slotIndex, memberIds)
   });
 }
 
+export function removeParticipantFromGroupConfig(groupConfig, participantId) {
+  return normalizeGroupConfig(groupConfig).map((c) => {
+    if (!c.fixedMembers || !Array.isArray(c.fixedMembers) || c.fixedMembers.length === 0) {
+      return c;
+    }
+    const count = effectiveGroupCount(c);
+    if (count === 1) {
+      if (typeof c.fixedMembers[0] === "string") {
+        return {
+          ...c,
+          fixedMembers: c.fixedMembers.filter((id) => id !== participantId),
+        };
+      }
+      if (Array.isArray(c.fixedMembers[0])) {
+        return {
+          ...c,
+          fixedMembers: c.fixedMembers.map((arr) =>
+            Array.isArray(arr) ? arr.filter((id) => id !== participantId) : arr,
+          ),
+        };
+      }
+      return {
+        ...c,
+        fixedMembers: c.fixedMembers.filter((id) => id !== participantId),
+      };
+    }
+    let fixed = c.fixedMembers;
+    if (typeof fixed[0] === "string") {
+      fixed = Array.from({ length: count }, () => []);
+    }
+    return {
+      ...c,
+      fixedMembers: fixed.map((entry) =>
+        Array.isArray(entry) ? entry.filter((id) => id !== participantId) : [],
+      ),
+    };
+  });
+}
+
 export function validateFixedMembers(groupConfig, participants) {
   const ids = new Set((participants || []).map((p) => p.id));
   const seen = new Set();

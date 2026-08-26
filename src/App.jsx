@@ -13,6 +13,7 @@ import {
   computeSatisfaction,
   normalizeResultGroups,
   getUnassignedParticipantIds,
+  removeParticipantFromGroupConfig,
 } from "./matching";
 
 // ─── Firebase helpers ──────────────────────────────────────────────────────────
@@ -766,7 +767,7 @@ function OrgSetup({ onStart }) {
 }
 
 // ─── Organizer: Dashboard ──────────────────────────────────────────────────────
-function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveSettings }) {
+function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveSettings, onRemoveParticipant }) {
   const [copied, setCopied] = useState(false);
   const [eventName, setEventName] = useState(session.eventName);
   const [groupConfig, setGroupConfig] = useState(session.groupConfig);
@@ -774,6 +775,7 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveS
   const [matchErr, setMatchErr] = useState("");
   const [saving, setSaving] = useState(false);
   const [matching, setMatching] = useState(false);
+  const [removingId, setRemovingId] = useState(null);
   const dirtyRef = useRef(false);
   const origin = window.location.origin + window.location.pathname;
   const participantUrl = `${origin}?join=${sessionId}`;
@@ -815,6 +817,13 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveS
   };
 
   const submitted = (session.participants || []).filter((p) => p.submitted);
+
+  const removeParticipant = async (participantId, participantName) => {
+    setRemovingId(participantId);
+    const err = await onRemoveParticipant(participantId, participantName);
+    if (err) setSettingsErr(err);
+    setRemovingId(null);
+  };
 
   return (
     <div>
@@ -891,9 +900,19 @@ function OrgDashboard({ session, sessionId, onRefresh, onMatch, onReset, onSaveS
                   }}>{(p.name || "?").charAt(0)}</div>
                   <span style={{ fontWeight: 600, fontSize: 14 }}>{p.name}</span>
                 </div>
-                {p.submitted
-                  ? <Tag color={C.teal}>提出済 ({(p.preferences || []).length}人希望)</Tag>
-                  : <Tag color={C.muted}>未提出</Tag>}
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  {p.submitted
+                    ? <Tag color={C.teal}>提出済 ({(p.preferences || []).length}人希望)</Tag>
+                    : <Tag color={C.muted}>未提出</Tag>}
+                  <button
+                    type="button"
+                    onClick={() => removeParticipant(p.id, p.name)}
+                    disabled={removingId === p.id}
+                    style={{ ...s.btn("danger"), padding: "4px 10px", fontSize: 11, opacity: removingId === p.id ? 0.5 : 1 }}
+                  >
+                    {removingId === p.id ? "..." : "削除"}
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -1808,6 +1827,51 @@ export default function App() {
     setOrgRestoring(false);
   };
 
+  const handleSwitchToParticipant = () => {
+    if (!sessionId) return;
+    setParticipantUnlocked(sessionId);
+    const url = new URL(window.location.href);
+    url.searchParams.set("join", sessionId);
+    window.history.replaceState({}, "", url);
+    setAppFlow("participant");
+  };
+
+  const handleSwitchToOrganizer = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("join");
+    window.history.replaceState({}, "", url);
+    const saved = loadOrganizerState();
+    if (saved?.sessionId) {
+      setSessionId(saved.sessionId);
+      setOrgStep(saved.orgStep);
+    }
+    setAppFlow("organizer");
+    setOrgRestoring(false);
+    refreshSession();
+  };
+
+  const handleRemoveParticipant = async (participantId, participantName) => {
+    if (!window.confirm(`「${participantName}」を参加者リストから削除しますか？`)) return null;
+    const s = await loadSession(sessionId);
+    if (!s) return "セッションが見つかりません";
+    s.participants = (s.participants || []).filter((p) => p.id !== participantId);
+    s.participants = s.participants.map((p) => ({
+      ...p,
+      preferences: (p.preferences || []).filter((id) => id !== participantId),
+    }));
+    s.groupConfig = removeParticipantFromGroupConfig(s.groupConfig, participantId);
+    if (s.result?.groups) {
+      s.result.groups = s.result.groups.map((g) => ({
+        ...g,
+        members: g.members.filter((id) => id !== participantId),
+      }));
+      s.result.satisfaction = computeSatisfaction(s.participants, s.result.groups);
+    }
+    await saveSession(sessionId, s);
+    setSession(s);
+    return null;
+  };
+
   const enterOrganizerFlow = (saved) => {
     if (saved?.sessionId) {
       setSessionId(saved.sessionId);
@@ -1891,7 +1955,7 @@ export default function App() {
         </div>
         {!joinParam && appFlow === "admin" && <Tag color={C.teal}>管理者</Tag>}
         {!joinParam && appFlow === "organizer" && <Tag color={C.accent}>幹事</Tag>}
-        {joinParam && <Tag color={C.teal}>参加者モード</Tag>}
+        {appFlow === "participant" && <Tag color={C.teal}>参加者モード</Tag>}
       </div>
 
       {sessionId && appFlow === "organizer" && (
@@ -1940,8 +2004,27 @@ export default function App() {
         )}
         {appFlow === "organizer" && !orgRestoring && (
           <>
+            {sessionId && orgStep !== "setup" && (
+              <button
+                type="button"
+                onClick={handleSwitchToParticipant}
+                style={{ ...s.btn("teal"), width: "100%", marginBottom: 16, padding: "12px 16px", fontSize: 14 }}
+              >
+                👤 メンバー画面へ（希望を入力）
+              </button>
+            )}
             {orgStep === "setup"     && <OrgSetup onStart={handleStart} />}
-            {orgStep === "dashboard" && session && <OrgDashboard session={session} sessionId={sessionId} onRefresh={refreshSession} onMatch={handleMatch} onReset={handleReset} onSaveSettings={handleSaveSettings} />}
+            {orgStep === "dashboard" && session && (
+              <OrgDashboard
+                session={session}
+                sessionId={sessionId}
+                onRefresh={refreshSession}
+                onMatch={handleMatch}
+                onReset={handleReset}
+                onSaveSettings={handleSaveSettings}
+                onRemoveParticipant={handleRemoveParticipant}
+              />
+            )}
             {orgStep === "result"    && session?.result && (
               <OrgResult
                 session={session}
@@ -1953,7 +2036,20 @@ export default function App() {
             )}
           </>
         )}
-        {appFlow === "participant" && sessionId  && <ParticipantView sessionId={sessionId} />}
+        {appFlow === "participant" && sessionId && (
+          <>
+            {organizerAuthed && (
+              <button
+                type="button"
+                onClick={handleSwitchToOrganizer}
+                style={{ ...s.btn("ghost"), width: "100%", marginBottom: 16, padding: "10px 16px", fontSize: 13 }}
+              >
+                ← 幹事画面に戻る
+              </button>
+            )}
+            <ParticipantView sessionId={sessionId} />
+          </>
+        )}
       </div>
     </div>
   );
