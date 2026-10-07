@@ -2082,17 +2082,50 @@ export default function App() {
     setLoginErr("");
   };
 
+  const handleBrandClick = () => {
+    if (appFlow === "participant") return;
+    clearOrganizerAuth();
+    clearAdminAuth();
+    setAdminStep("settings");
+    setAppFlow("home");
+    setHomeStep("menu");
+    setLoginErr("");
+    setSession(null);
+    setSessionId(null);
+    setOrgRestoring(false);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("join");
+    window.history.replaceState({}, "", url);
+  };
+
+  const brandClickable = appFlow === "organizer" || appFlow === "admin" || appFlow === "home";
+
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic', sans-serif" }}>
       {/* Top bar */}
       <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "14px 20px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <button
+          type="button"
+          onClick={brandClickable ? handleBrandClick : undefined}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            background: "none",
+            border: "none",
+            padding: 0,
+            color: "inherit",
+            cursor: brandClickable ? "pointer" : "default",
+            textAlign: "left",
+          }}
+          aria-label={brandClickable ? "トップ画面へ戻る" : undefined}
+        >
           <div style={{ width: 32, height: 32, borderRadius: 8, background: `linear-gradient(135deg, ${C.accent}, ${C.teal})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>🗺️</div>
           <div>
             <div style={{ fontWeight: 800, fontSize: 14, lineHeight: 1.1 }}>TripMatch</div>
             <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1 }}>GROUP MATCHING SYSTEM</div>
           </div>
-        </div>
+        </button>
         {!joinParam && appFlow === "admin" && <Tag color={C.teal}>管理者</Tag>}
         {!joinParam && appFlow === "organizer" && <Tag color={C.accent}>幹事</Tag>}
         {appFlow === "participant" && <Tag color={C.teal}>参加者モード</Tag>}
