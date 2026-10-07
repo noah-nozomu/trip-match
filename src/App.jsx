@@ -617,7 +617,138 @@ function PasswordGate({ title, subtitle, onSubmit, onBack, loading, error, varia
   );
 }
 
-function AdminPanel({ onLogout }) {
+function AdminVotesPanel({ onBack }) {
+  const [session, setSession] = useState(null);
+  const [sessionId, setSessionId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+
+  const loadData = async () => {
+    setLoading(true);
+    setErr("");
+    const saved = loadOrganizerState();
+    if (!saved?.sessionId) {
+      setSessionId(null);
+      setSession(null);
+      setLoading(false);
+      return;
+    }
+    setSessionId(saved.sessionId);
+    try {
+      const s = await loadSession(saved.sessionId);
+      if (!s) {
+        setSession(null);
+        setErr("セッションが見つかりません（削除された可能性があります）");
+      } else {
+        setSession(s);
+      }
+    } catch {
+      setSession(null);
+      setErr("データの取得に失敗しました");
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const participants = session?.participants || [];
+  const nameById = new Map(participants.map((p) => [p.id, p.name]));
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={onBack}
+        style={{ ...s.btn("ghost"), width: "100%", marginBottom: 16, padding: "10px 16px", fontSize: 13 }}
+      >
+        ← 管理者画面に戻る
+      </button>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+        <div>
+          <div style={{ fontSize: 11, letterSpacing: 3, color: C.teal, marginBottom: 8 }}>ADMIN</div>
+          <h2 style={{ margin: 0, fontSize: 24, fontWeight: 900 }}>みんなのあれこれ</h2>
+          <p style={{ color: C.muted, fontSize: 13, marginTop: 8 }}>
+            このブラウザに保存されている幹事セッションの希望投票一覧
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={loadData}
+          disabled={loading}
+          style={{ ...s.btn("ghost"), padding: "8px 14px", fontSize: 13, opacity: loading ? 0.5 : 1 }}
+        >
+          ↻ 更新
+        </button>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", padding: 40, color: C.muted }}>読み込み中...</div>
+      )}
+
+      {!loading && !sessionId && (
+        <div style={{ ...s.card, textAlign: "center", color: C.muted, padding: 28, fontSize: 14, lineHeight: 1.7 }}>
+          幹事セッションがこのブラウザに保存されていません。
+          <br />
+          幹事画面で参加URLを発行したあと、同じブラウザで管理者ログインしてください。
+        </div>
+      )}
+
+      {!loading && sessionId && (
+        <div style={{ ...s.card, marginBottom: 16, borderColor: C.teal + "40" }}>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>対象セッション</div>
+          <div style={{ fontWeight: 800, fontSize: 16 }}>{session?.eventName || "（名称なし）"}</div>
+          <div style={{ fontFamily: "monospace", fontSize: 12, color: C.muted, marginTop: 6, letterSpacing: 1 }}>
+            ID: {sessionId}
+          </div>
+        </div>
+      )}
+
+      {err && <div style={{ color: C.red, fontSize: 13, marginBottom: 16 }}>{err}</div>}
+
+      {!loading && session && participants.length === 0 && (
+        <div style={{ ...s.card, textAlign: "center", color: C.muted, padding: 24 }}>参加者がまだいません</div>
+      )}
+
+      {!loading && session && participants.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {participants.map((p) => {
+            const prefs = p.preferences || [];
+            const resolveName = (id) => {
+              if (nameById.has(id)) return nameById.get(id);
+              return "（削除済み）";
+            };
+            return (
+              <div key={p.id} style={{ ...s.card, padding: "14px 16px" }}>
+                <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 10 }}>
+                  {p.name}
+                  <span style={{ fontWeight: 600, fontSize: 13, color: p.submitted ? C.teal : C.muted, marginLeft: 8 }}>
+                    （{p.submitted ? "提出済み" : "未提出"}）
+                  </span>
+                </div>
+                {prefs.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {prefs.map((id, i) => (
+                      <div key={`${p.id}-${i}-${id}`} style={{ fontSize: 14, color: C.text }}>
+                        {i + 1}位：{resolveName(id)}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 14, color: C.muted }}>希望なし</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminPanel({ onLogout, onOpenVotes }) {
   const [organizerPassword, setOrganizerPassword] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const [loading, setLoading] = useState(true);
@@ -674,6 +805,13 @@ function AdminPanel({ onLogout }) {
         <h2 style={{ margin: 0, fontSize: 24, fontWeight: 900 }}>管理者設定</h2>
         <p style={{ color: C.muted, fontSize: 14, marginTop: 8 }}>幹事・管理者のログイン用パスワードを変更できます</p>
       </div>
+      <button
+        type="button"
+        onClick={onOpenVotes}
+        style={{ ...s.btn("teal"), width: "100%", padding: 16, fontSize: 15, marginBottom: 20 }}
+      >
+        みんなのあれこれ
+      </button>
       <div style={{ ...s.card, marginBottom: 16 }}>
         <label style={s.label}>幹事用パスワード</label>
         <input
@@ -1672,6 +1810,7 @@ export default function App() {
     return "home";
   });
   const [homeStep, setHomeStep] = useState("menu");
+  const [adminStep, setAdminStep] = useState("settings");
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginErr, setLoginErr] = useState("");
 
@@ -1916,11 +2055,11 @@ export default function App() {
       }
       setAdminAuthenticated();
       clearOrganizerAuth();
-      clearOrganizerState();
       setSessionId(null);
       setSession(null);
       setOrgStep("setup");
       setOrgRestoring(false);
+      setAdminStep("settings");
       setHomeStep("menu");
       setAppFlow("admin");
     } catch {
@@ -1932,6 +2071,7 @@ export default function App() {
 
   const handleAdminLogout = () => {
     clearAdminAuth();
+    setAdminStep("settings");
     setAppFlow("home");
     setHomeStep("menu");
     setLoginErr("");
@@ -1995,7 +2135,15 @@ export default function App() {
             variant="teal"
           />
         )}
-        {appFlow === "admin" && <AdminPanel onLogout={handleAdminLogout} />}
+        {appFlow === "admin" && adminStep === "settings" && (
+          <AdminPanel
+            onLogout={handleAdminLogout}
+            onOpenVotes={() => setAdminStep("votes")}
+          />
+        )}
+        {appFlow === "admin" && adminStep === "votes" && (
+          <AdminVotesPanel onBack={() => setAdminStep("settings")} />
+        )}
         {appFlow === "organizer" && orgRestoring && (
           <div style={{ textAlign: "center", padding: 60, color: C.muted }}>
             <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
